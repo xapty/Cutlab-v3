@@ -1,0 +1,6 @@
+{
+  "name": "CutLab",
+  "description": "Native Android video editor combining intuitive quick editing with multi-track motion-graphics depth.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
