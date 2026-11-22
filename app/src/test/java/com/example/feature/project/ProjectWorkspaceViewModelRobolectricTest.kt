@@ -186,13 +186,13 @@ class ProjectWorkspaceViewModelRobolectricTest {
     }
 
     @Test
-    fun `future schema v3 in viewModel blocks mutating operations and preserves raw JSON`() = runTest {
+    fun `future schema v4 in viewModel blocks mutating operations and preserves raw JSON`() = runTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
 
         val futureRawJson = """
             {
-              "schemaVersion": 3,
+              "schemaVersion": 4,
               "id": "vm-future-v3",
               "name": "Future Lyric Project",
               "aspectRatio": "VERTICAL_9_16",
@@ -232,7 +232,7 @@ class ProjectWorkspaceViewModelRobolectricTest {
                 canvasHeight = 1920,
                 fps = 30,
                 editorModeName = EditorMode.ADVANCED.name,
-                schemaVersion = 3,
+                schemaVersion = 4,
                 projectJson = futureRawJson,
                 coverMediaUri = null,
                 createdAt = 1_000L,
@@ -254,7 +254,7 @@ class ProjectWorkspaceViewModelRobolectricTest {
         }
         val state = viewModel.uiState.first { !it.isLoading && it.project != null }
         assertTrue(state.isReadOnlyFutureVersion)
-        assertEquals(3, state.detectedSchemaVersion)
+        assertEquals(4, state.detectedSchemaVersion)
         assertEquals(setOf("autoLyricTracks"), state.unsupportedFutureKeys)
         assertFalse(state.canUndo)
         assertFalse(state.canSplitAtPlayhead)
@@ -271,7 +271,7 @@ class ProjectWorkspaceViewModelRobolectricTest {
         assertFalse(emittedMessages.any { it.contains("Applied", ignoreCase = true) })
 
         val stored = database.projectDao().getProjectById("vm-future-v3")!!
-        assertEquals(3, stored.schemaVersion)
+        assertEquals(4, stored.schemaVersion)
         assertEquals(futureRawJson, stored.projectJson)
 
         msgJob.cancel()

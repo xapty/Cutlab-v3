@@ -752,17 +752,20 @@ private fun eligibleKeyframeProperties(
     clip: TimelineClipRef,
     asset: MediaAsset?,
 ): List<KeyframeProperty> = when {
-    clip.clipKind == ClipKind.TEXT -> listOf(
-        KeyframeProperty.POSITION_X,
-        KeyframeProperty.POSITION_Y,
-        KeyframeProperty.SCALE_X,
-        KeyframeProperty.SCALE_Y,
-        KeyframeProperty.ROTATION,
-        KeyframeProperty.OPACITY,
-        KeyframeProperty.ANCHOR_X,
-        KeyframeProperty.ANCHOR_Y,
-        KeyframeProperty.TEXT_FONT_SCALE,
-    )
+    clip.clipKind == ClipKind.TEXT -> buildList {
+        add(KeyframeProperty.POSITION_X)
+        add(KeyframeProperty.POSITION_Y)
+        add(KeyframeProperty.SCALE_X)
+        add(KeyframeProperty.SCALE_Y)
+        add(KeyframeProperty.ROTATION)
+        add(KeyframeProperty.OPACITY)
+        add(KeyframeProperty.ANCHOR_X)
+        add(KeyframeProperty.ANCHOR_Y)
+        add(KeyframeProperty.TEXT_FONT_SCALE)
+        if (clip.textSpec?.renderMode == com.example.engine.project.TextRenderMode.INVERT_VIDEO) {
+            add(KeyframeProperty.TEXT_INVERT_STRENGTH)
+        }
+    }
     clip.clipKind == ClipKind.ADJUSTMENT -> listOf(
         KeyframeProperty.BLUR,
         KeyframeProperty.SHADER_INTENSITY,

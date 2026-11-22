@@ -8,17 +8,25 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.Layout
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.style.ForegroundColorSpan
+import android.text.style.ScaleXSpan
 import androidx.core.content.res.ResourcesCompat
 import com.example.R
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.EasingPreset
+import com.example.engine.project.KaraokeHighlightMode
 import com.example.engine.project.LayerTransform
 import com.example.engine.project.TextAlignMode
 import com.example.engine.project.TextAnimationPreset
 import com.example.engine.project.TextOverlaySpec
+import com.example.engine.project.TextRenderMode
 import com.example.engine.project.TextStylePreset
+import com.example.engine.text.UnifiedTextEngine
+import com.example.engine.text.WordPlaybackState
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -33,12 +41,18 @@ data class RenderedTextBitmapFrame(
     val rotationDeg: Float,
     val anchorX: Float = 0.5f,
     val anchorY: Float = 0.5f,
+    val isCacheManaged: Boolean = false,
+    val cacheKey: String = "",
+    val isInvertMask: Boolean = false,
+    val invertStrength: Float = 1.0f,
+    val invertEdgeSoftness: Float = 0.08f,
 )
 
 /**
  * Renders CutLab TextOverlaySpec + animated LayerTransform onto an ARGB_8888 Bitmap for GPU
- * upload inside the Path B OpenGL ES 2.0 compositor so text layers match live preview
- * typography, pills, strokes, shadows, and blend modes.
+ * upload inside both live preview ([GlCompositorRenderer] for Invert Lyric) and Path B
+ * ([CustomGlVideoExporter]) so typography, word-level karaoke highlighting, pills, strokes,
+ * shadows, and Invert Lyric glyph masks stay identical across preview and export.
  */
 class TextLayerBitmapRenderer(
     private val context: Context,
@@ -57,6 +71,17 @@ class TextLayerBitmapRenderer(
     }
     private val serifBold by lazy { Typeface.create(Typeface.SERIF, Typeface.BOLD) }
 
+    private val bitmapCache = object : LinkedHashMap<String, Bitmap>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean {
+            return size > 16
+        }
+    }
+
+    @Synchronized
+    fun clearCache() {
+        bitmapCache.clear()
+    }
+
     fun render(
         spec: TextOverlaySpec,
         transform: LayerTransform,
@@ -68,20 +93,25 @@ class TextLayerBitmapRenderer(
         val rawAnimT = (clipRelativeMs.toFloat() / animWindowMs).coerceIn(0f, 1f)
         val eased = EffectsEngine.applyEasing(rawAnimT, EasingPreset.EASE_OUT)
 
-        val displayText = when (spec.animationPreset) {
+        val karaokeEval = UnifiedTextEngine.evaluateKaraoke(spec, clipRelativeMs)
+        val fullPlainText = if (karaokeEval.hasTimedWords) {
+            karaokeEval.words.joinToString(" ") { it.word.text }
+        } else {
+            spec.text
+        }
+        val visibleCharCount = when (spec.animationPreset) {
             TextAnimationPreset.TYPEWRITER -> {
-                if (spec.text.isEmpty()) {
-                    ""
-                } else {
-                    val count = (spec.text.length * (clipRelativeMs.toFloat() / 900f).coerceIn(0.05f, 1f))
+                if (fullPlainText.isEmpty()) 0 else {
+                    (fullPlainText.length * (clipRelativeMs.toFloat() / 900f).coerceIn(0.05f, 1f))
                         .roundToInt()
-                        .coerceIn(1, spec.text.length)
-                    spec.text.take(count)
+                        .coerceIn(1, fullPlainText.length)
                 }
             }
-            else -> spec.text
+            else -> fullPlainText.length
         }
-        if (displayText.isEmpty()) return null
+        if (visibleCharCount <= 0 || fullPlainText.isBlank()) return null
+
+        val isInvertMask = spec.renderMode == TextRenderMode.INVERT_VIDEO
 
         val animAlpha = when (spec.animationPreset) {
             TextAnimationPreset.FADE_IN, TextAnimationPreset.SLIDE_UP -> eased
@@ -106,6 +136,80 @@ class TextLayerBitmapRenderer(
             sin(clipRelativeMs * 0.25f) * 0.02f * (1f - rawAnimT)
         } else 0f
 
+        val minDim = minOf(canvasWidth, canvasHeight).toFloat().coerceAtLeast(360f)
+        val textSizePx = (minDim * 0.068f * spec.fontScale.coerceIn(0.5f, 2.5f)).coerceIn(18f, 260f)
+
+        val karaokeSig = if (karaokeEval.hasTimedWords && spec.karaokeMode != KaraokeHighlightMode.NONE) {
+            karaokeEval.cacheSignature()
+        } else {
+            "none"
+        }
+        val cacheKey = buildString {
+            append(if (isInvertMask) "INV|" else "NRM|")
+            append(spec.stylePreset.name).append('|')
+            append(spec.alignment.name).append('|')
+            append(textSizePx.roundToInt()).append('|')
+            append(canvasWidth).append('x').append(canvasHeight).append('|')
+            append(spec.textColorArgb).append('|')
+            append(spec.highlightColorArgb).append('|')
+            append(spec.spokenColorArgb).append('|')
+            append(spec.backgroundColorArgb).append('|')
+            append(spec.hasShadow).append('|')
+            append(spec.hasStroke).append('|')
+            append(spec.invertIncludeBackground).append('|')
+            append((spec.wordSpacingEm * 100).roundToInt()).append('|')
+            append(visibleCharCount).append('|')
+            append(fullPlainText).append('|')
+            append(karaokeSig)
+        }
+
+        val cachedBitmap = synchronized(this) { bitmapCache[cacheKey]?.takeIf { !it.isRecycled } }
+        val bitmap = cachedBitmap ?: renderBitmapInternal(
+            spec = spec,
+            isInvertMask = isInvertMask,
+            fullPlainText = fullPlainText,
+            visibleCharCount = visibleCharCount,
+            karaokeEval = karaokeEval,
+            textSizePx = textSizePx,
+            minDim = minDim,
+            canvasWidth = canvasWidth,
+            canvasHeight = canvasHeight,
+        )?.also { generated ->
+            synchronized(this) { bitmapCache[cacheKey] = generated }
+        } ?: return null
+
+        val posX = (spec.offsetX + transform.positionX).coerceIn(-0.95f, 0.95f)
+        val posY = (spec.offsetY + transform.positionY).coerceIn(-0.95f, 0.95f)
+
+        return RenderedTextBitmapFrame(
+            bitmap = bitmap,
+            combinedAlpha = (animAlpha * transform.opacity).coerceIn(0f, 1f),
+            combinedScaleX = animScale * transform.scaleX,
+            combinedScaleY = animScale * transform.scaleY,
+            centerOffsetXNorm = posX + glitchOffsetXNdc * 0.5f,
+            centerOffsetYNorm = posY - animTranslateYNdc * 0.5f,
+            rotationDeg = transform.rotationDeg,
+            anchorX = transform.anchorX,
+            anchorY = transform.anchorY,
+            isCacheManaged = true,
+            cacheKey = cacheKey,
+            isInvertMask = isInvertMask,
+            invertStrength = spec.invertStrength.coerceIn(0f, 1f),
+            invertEdgeSoftness = spec.invertEdgeSoftness.coerceIn(0f, 1f),
+        )
+    }
+
+    private fun renderBitmapInternal(
+        spec: TextOverlaySpec,
+        isInvertMask: Boolean,
+        fullPlainText: String,
+        visibleCharCount: Int,
+        karaokeEval: com.example.engine.text.KaraokeEvaluation,
+        textSizePx: Float,
+        minDim: Float,
+        canvasWidth: Int,
+        canvasHeight: Int,
+    ): Bitmap? {
         val typeface = when (spec.stylePreset) {
             TextStylePreset.BOLD_TITLE,
             TextStylePreset.NEON_POP,
@@ -116,20 +220,30 @@ class TextLayerBitmapRenderer(
             TextStylePreset.MINIMAL_SUBTITLE -> interMedium
         }
 
-        val minDim = minOf(canvasWidth, canvasHeight).toFloat().coerceAtLeast(360f)
-        val textSizePx = (minDim * 0.068f * spec.fontScale.coerceIn(0.5f, 2.5f)).coerceIn(18f, 260f)
+        val styledText: CharSequence = buildStyledSequence(
+            spec = spec,
+            isInvertMask = isInvertMask,
+            fullPlainText = fullPlainText,
+            visibleCharCount = visibleCharCount,
+            karaokeEval = karaokeEval,
+        )
+        if (styledText.isEmpty()) return null
 
         val bgArgb = spec.backgroundColorArgb.toInt()
-        val hasBg = Color.alpha(bgArgb) > 6
-        val padH = if (hasBg) textSizePx * 0.55f else textSizePx * 0.28f
-        val padV = if (hasBg) textSizePx * 0.28f else textSizePx * 0.18f
+        val drawBg = if (isInvertMask) {
+            spec.invertIncludeBackground && Color.alpha(bgArgb) > 6
+        } else {
+            Color.alpha(bgArgb) > 6
+        }
+        val padH = if (drawBg) textSizePx * 0.55f else textSizePx * 0.28f
+        val padV = if (drawBg) textSizePx * 0.28f else textSizePx * 0.18f
         val maxContentWidth = (canvasWidth * 0.86f - padH * 2f).roundToInt().coerceAtLeast(120)
 
         val fillPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             this.typeface = typeface
             this.textSize = textSizePx
-            this.color = spec.textColorArgb.toInt()
-            if (spec.hasShadow) {
+            this.color = if (isInvertMask) Color.WHITE else spec.textColorArgb.toInt()
+            if (!isInvertMask && spec.hasShadow) {
                 setShadowLayer(
                     (textSizePx * 0.14f).coerceAtLeast(2f),
                     textSizePx * 0.04f,
@@ -146,7 +260,7 @@ class TextLayerBitmapRenderer(
         }
 
         val layout = StaticLayout.Builder
-            .obtain(displayText, 0, displayText.length, fillPaint, maxContentWidth)
+            .obtain(styledText, 0, styledText.length, fillPaint, maxContentWidth)
             .setAlignment(layoutAlign)
             .setIncludePad(true)
             .build()
@@ -159,7 +273,7 @@ class TextLayerBitmapRenderer(
         val tightLayoutW = ceil(maxLineW).toInt().coerceIn(2, maxContentWidth)
         val tightLayout = if (tightLayoutW < maxContentWidth) {
             StaticLayout.Builder
-                .obtain(displayText, 0, displayText.length, fillPaint, tightLayoutW)
+                .obtain(styledText, 0, styledText.length, fillPaint, tightLayoutW)
                 .setAlignment(layoutAlign)
                 .setIncludePad(true)
                 .build()
@@ -167,16 +281,20 @@ class TextLayerBitmapRenderer(
             layout
         }
 
-        val shadowMargin = if (spec.hasShadow || spec.hasStroke) (textSizePx * 0.22f) else 4f
+        val shadowMargin = if (!isInvertMask && (spec.hasShadow || spec.hasStroke)) {
+            textSizePx * 0.22f
+        } else {
+            4f
+        }
         val bmpW = ceil(tightLayout.width + padH * 2f + shadowMargin * 2f).toInt().coerceIn(8, canvasWidth)
         val bmpH = ceil(tightLayout.height + padV * 2f + shadowMargin * 2f).toInt().coerceIn(8, canvasHeight)
 
         val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        if (hasBg) {
+        if (drawBg) {
             val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = bgArgb
+                color = if (isInvertMask) Color.WHITE else bgArgb
                 style = Paint.Style.FILL
             }
             val bgRect = RectF(
@@ -192,7 +310,8 @@ class TextLayerBitmapRenderer(
         canvas.save()
         canvas.translate(shadowMargin + padH, shadowMargin + padV)
 
-        if (spec.hasStroke) {
+        if (!isInvertMask && spec.hasStroke) {
+            val strokeText = styledText.toString()
             val strokePaint = TextPaint(fillPaint).apply {
                 clearShadowLayer()
                 style = Paint.Style.STROKE
@@ -201,7 +320,7 @@ class TextLayerBitmapRenderer(
                 color = Color.argb(220, 0, 0, 0)
             }
             val strokeLayout = StaticLayout.Builder
-                .obtain(displayText, 0, displayText.length, strokePaint, tightLayout.width)
+                .obtain(strokeText, 0, strokeText.length, strokePaint, tightLayout.width)
                 .setAlignment(layoutAlign)
                 .setIncludePad(true)
                 .build()
@@ -210,20 +329,75 @@ class TextLayerBitmapRenderer(
 
         tightLayout.draw(canvas)
         canvas.restore()
+        return bitmap
+    }
 
-        val posX = (spec.offsetX + transform.positionX).coerceIn(-0.95f, 0.95f)
-        val posY = (spec.offsetY + transform.positionY).coerceIn(-0.95f, 0.95f)
+    private fun buildStyledSequence(
+        spec: TextOverlaySpec,
+        isInvertMask: Boolean,
+        fullPlainText: String,
+        visibleCharCount: Int,
+        karaokeEval: com.example.engine.text.KaraokeEvaluation,
+    ): CharSequence {
+        val builder = SpannableStringBuilder()
+        val spacingScale = (1f + spec.wordSpacingEm.coerceIn(0f, 1.5f) * 2.2f)
 
-        return RenderedTextBitmapFrame(
-            bitmap = bitmap,
-            combinedAlpha = (animAlpha * transform.opacity).coerceIn(0f, 1f),
-            combinedScaleX = animScale * transform.scaleX,
-            combinedScaleY = animScale * transform.scaleY,
-            centerOffsetXNorm = posX + glitchOffsetXNdc * 0.5f,
-            centerOffsetYNorm = posY - animTranslateYNdc * 0.5f,
-            rotationDeg = transform.rotationDeg,
-            anchorX = transform.anchorX,
-            anchorY = transform.anchorY,
-        )
+        if (!karaokeEval.hasTimedWords || spec.karaokeMode == KaraokeHighlightMode.NONE) {
+            val clipped = fullPlainText.take(visibleCharCount)
+            builder.append(clipped)
+            if (spacingScale > 1.02f) {
+                for (i in clipped.indices) {
+                    if (clipped[i] == ' ') {
+                        builder.setSpan(ScaleXSpan(spacingScale), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
+            }
+            return builder
+        }
+
+        var remainingChars = visibleCharCount
+        karaokeEval.words.forEachIndexed { idx, evaluated ->
+            if (remainingChars <= 0) return@forEachIndexed
+            if (idx > 0) {
+                val spaceStart = builder.length
+                builder.append(' ')
+                if (spacingScale > 1.02f) {
+                    builder.setSpan(
+                        ScaleXSpan(spacingScale),
+                        spaceStart,
+                        spaceStart + 1,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
+                remainingChars -= 1
+                if (remainingChars <= 0) return@forEachIndexed
+            }
+            val wordText = evaluated.word.text.take(remainingChars)
+            remainingChars -= wordText.length
+            val start = builder.length
+            builder.append(wordText)
+            val end = builder.length
+
+            val colorInt = if (isInvertMask) {
+                when (evaluated.state) {
+                    WordPlaybackState.ACTIVE -> Color.argb(255, 255, 255, 255)
+                    WordPlaybackState.SPOKEN -> Color.argb(215, 255, 255, 255)
+                    WordPlaybackState.INACTIVE -> Color.argb(140, 255, 255, 255)
+                }
+            } else {
+                when (evaluated.state) {
+                    WordPlaybackState.ACTIVE -> spec.highlightColorArgb.toInt()
+                    WordPlaybackState.SPOKEN -> spec.spokenColorArgb.toInt()
+                    WordPlaybackState.INACTIVE -> spec.textColorArgb.toInt()
+                }
+            }
+            builder.setSpan(
+                ForegroundColorSpan(colorInt),
+                start,
+                end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+        }
+        return builder
     }
 }

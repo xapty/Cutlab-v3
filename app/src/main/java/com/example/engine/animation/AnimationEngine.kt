@@ -208,11 +208,22 @@ class AnimationEngine {
         clipRelativeMs: Long,
     ): TextOverlaySpec? {
         val spec = clip.textSpec ?: return null
-        if (clip.keyframeTracks.none { it.property == KeyframeProperty.TEXT_FONT_SCALE }) {
+        val hasScaleTrack = clip.keyframeTracks.any { it.property == KeyframeProperty.TEXT_FONT_SCALE }
+        val hasInvertTrack = clip.keyframeTracks.any { it.property == KeyframeProperty.TEXT_INVERT_STRENGTH }
+        if (!hasScaleTrack && !hasInvertTrack) {
             return spec
         }
-        val scale = evaluateProperty(clip, KeyframeProperty.TEXT_FONT_SCALE, clipRelativeMs).coerceIn(0.5f, 2.5f)
-        return spec.copy(fontScale = scale)
+        val scale = if (hasScaleTrack) {
+            evaluateProperty(clip, KeyframeProperty.TEXT_FONT_SCALE, clipRelativeMs).coerceIn(0.5f, 2.5f)
+        } else {
+            spec.fontScale
+        }
+        val invertStrength = if (hasInvertTrack) {
+            evaluateProperty(clip, KeyframeProperty.TEXT_INVERT_STRENGTH, clipRelativeMs).coerceIn(0f, 1f)
+        } else {
+            spec.invertStrength
+        }
+        return spec.copy(fontScale = scale, invertStrength = invertStrength)
     }
 
     fun sampleCurvePoints(
@@ -245,6 +256,7 @@ class AnimationEngine {
         KeyframeProperty.SHADER_INTENSITY -> clip.shaderEffect.intensity
         KeyframeProperty.MASK_FEATHER -> clip.mask.feather
         KeyframeProperty.TEXT_FONT_SCALE -> clip.textSpec?.fontScale ?: 1f
+        KeyframeProperty.TEXT_INVERT_STRENGTH -> clip.textSpec?.invertStrength ?: 1f
     }
 
     fun generatePresetKeyframeTracks(

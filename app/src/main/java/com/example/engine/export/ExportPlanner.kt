@@ -5,10 +5,12 @@ import android.media.MediaFormat
 import com.example.engine.project.ClipKind
 import com.example.engine.project.ExportSettingsSpec
 import com.example.engine.project.FilterPreset
+import com.example.engine.project.KaraokeHighlightMode
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectDocument
+import com.example.engine.project.TextRenderMode
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
 import com.example.engine.timeline.TimelineEngine
@@ -238,6 +240,16 @@ class ExportPlanner(
         }
         if (activeTracks.any { it.type == TrackType.TEXT && it.clips.isNotEmpty() }) {
             reasons += "Text & kinetic typography layers"
+        }
+        val activeTextSpecs = activeTracks
+            .filter { it.type == TrackType.TEXT }
+            .flatMap { it.clips }
+            .mapNotNull { it.textSpec }
+        if (activeTextSpecs.any { it.renderMode == TextRenderMode.INVERT_VIDEO }) {
+            reasons += "Invert Lyric GPU mask effect"
+        }
+        if (activeTextSpecs.any { it.timedWords.isNotEmpty() && it.karaokeMode != KaraokeHighlightMode.NONE }) {
+            reasons += "Word-level karaoke highlighting"
         }
         if (activeTracks.any { it.type == TrackType.ADJUSTMENT && it.clips.isNotEmpty() }) {
             reasons += "Adjustment layers"

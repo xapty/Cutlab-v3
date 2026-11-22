@@ -654,10 +654,10 @@ class ProjectRepositoryRobolectricTest {
     }
 
     @Test
-    fun `future schema v3 row opens read-only and blocks all repository writes while preserving raw JSON on disk`() = runTest {
+    fun `future schema v4 row opens read-only and blocks all repository writes while preserving raw JSON on disk`() = runTest {
         val futureRawJson = """
             {
-              "schemaVersion": 3,
+              "schemaVersion": 4,
               "id": "proj-future-3",
               "name": "Future Captions Studio",
               "aspectRatio": "VERTICAL_9_16",
@@ -691,7 +691,7 @@ class ProjectRepositoryRobolectricTest {
             canvasHeight = 1920,
             fps = 30,
             editorModeName = EditorMode.ADVANCED.name,
-            schemaVersion = 3,
+            schemaVersion = 4,
             projectJson = futureRawJson,
             coverMediaUri = null,
             createdAt = 1_000L,
@@ -721,28 +721,28 @@ class ProjectRepositoryRobolectricTest {
         val loadState = repository.observeProjectLoadState("proj-future-3").first()
         assertEquals(true, loadState is ProjectRepositoryLoadState.UnsupportedFutureVersion)
         val unsupported = loadState as ProjectRepositoryLoadState.UnsupportedFutureVersion
-        assertEquals(3, unsupported.detectedSchemaVersion)
+        assertEquals(4, unsupported.detectedSchemaVersion)
         assertEquals(setOf("captionTracks", "lyricAlignmentMode"), unsupported.unknownTopLevelKeys)
 
         val summary = repository.observeProjectSummaries().first().single { it.document.id == "proj-future-3" }
         assertEquals(true, summary.isUnsupportedFutureVersion)
-        assertEquals(3, summary.detectedSchemaVersion)
+        assertEquals(4, summary.detectedSchemaVersion)
 
-        // All mutating operations must be blocked without overwriting stored schema v3 payload
+        // All mutating operations must be blocked without overwriting stored schema v4 payload
         assertEquals(
-            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 3),
+            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 4),
             repository.renameProject("proj-future-3", "Hijacked"),
         )
         assertEquals(
-            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 3),
+            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 4),
             repository.switchEditorMode("proj-future-3", EditorMode.QUICK),
         )
         assertEquals(
-            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 3),
+            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 4),
             repository.updateProjectCanvas("proj-future-3", AspectRatioPreset.LANDSCAPE_16_9, 60),
         )
         assertEquals(
-            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 3),
+            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 4),
             repository.updateProjectExportSettings("proj-future-3", ExportSettingsSpec(resolutionHeight = 720)),
         )
         val forgedV2Copy = unsupported.previewDocument.copy(
@@ -750,7 +750,7 @@ class ProjectRepositoryRobolectricTest {
             name = "Downgraded?",
         )
         assertEquals(
-            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 3),
+            ProjectSaveOutcome.BlockedUnsupportedFutureVersion("proj-future-3", 4),
             repository.saveDocument(forgedV2Copy),
         )
         assertNull(repository.addTrack("proj-future-3", TrackType.OVERLAY))
@@ -765,7 +765,7 @@ class ProjectRepositoryRobolectricTest {
         assertEquals(true, importReport.blockedByUnsupportedFutureSchema)
 
         val storedAfterAttempts = database.projectDao().getProjectById("proj-future-3")!!
-        assertEquals(3, storedAfterAttempts.schemaVersion)
+        assertEquals(4, storedAfterAttempts.schemaVersion)
         assertEquals("Future Captions Studio", storedAfterAttempts.name)
         assertEquals(futureRawJson, storedAfterAttempts.projectJson)
     }

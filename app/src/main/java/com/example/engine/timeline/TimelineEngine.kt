@@ -27,11 +27,13 @@ import com.example.engine.project.SpeedPoint
 import com.example.engine.project.SpeedRampPreset
 import com.example.engine.project.StabilizationSpec
 import com.example.engine.project.TextOverlaySpec
+import com.example.engine.project.TimedTextWord
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineMarker
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
+import com.example.engine.text.UnifiedTextEngine
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -40,6 +42,12 @@ const val MIN_CLIP_DURATION_MS = 100L
 const val MAX_IMAGE_CLIP_DURATION_MS = 600_000L
 const val TEXT_ASSET_PLACEHOLDER_ID = "cutlab_text_layer"
 const val ADJUSTMENT_ASSET_PLACEHOLDER_ID = "cutlab_adjustment_layer"
+
+data class TimedTextClipRequest(
+    val timelineStartMs: Long,
+    val durationMs: Long,
+    val spec: TextOverlaySpec,
+)
 
 data class ActiveClipLayer(
     val track: TimelineTrack,
@@ -556,6 +564,128 @@ class TimelineEngine(
     ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
         if (clip.clipKind != ClipKind.TEXT) return@updateClipById clip
         clip.copy(textSpec = spec)
+    }
+
+    fun updateClipTimedWords(
+        document: ProjectDocument,
+        clipId: String,
+        timedWords: List<TimedTextWord>,
+        isTimingEstimated: Boolean? = null,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        val existing = clip.textSpec ?: return@updateClipById clip
+        if (clip.clipKind != ClipKind.TEXT) return@updateClipById clip
+        val normalized = UnifiedTextEngine.normalizeWords(timedWords, clip.durationMs)
+        clip.copy(
+            textSpec = existing.copy(
+                timedWords = normalized,
+                isTimingEstimated = isTimingEstimated ?: normalized.any { it.isEstimated },
+            ),
+        )
+    }
+
+    /**
+     * Inserts a batch of timed captions or lyrics onto an unlocked TEXT track as a single
+     * logical timeline mutation (one undo/redo step).
+     * Never silently shifts unrelated clips and respects locked tracks.
+     */
+    fun insertTextClipsBatch(
+        document: ProjectDocument,
+        requests: List<TimedTextClipRequest>,
+        targetTrackId: String? = null,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Pair<ProjectDocument, List<TimelineClipRef>> {
+        if (requests.isEmpty()) return document to emptyList()
+
+        val sortedReqs = requests
+            .sortedBy { it.timelineStartMs }
+            .mapNotNull { req ->
+                val safeStart = req.timelineStartMs.coerceAtLeast(0L)
+                val safeDur = req.durationMs.coerceIn(MIN_CLIP_DURATION_MS, MAX_IMAGE_CLIP_DURATION_MS)
+                if (req.spec.text.isBlank()) null else req.copy(timelineStartMs = safeStart, durationMs = safeDur)
+            }
+        if (sortedReqs.isEmpty()) return document to emptyList()
+
+        // Ensure batch intervals themselves never overlap each other
+        val nonOverlappingBatch = mutableListOf<TimedTextClipRequest>()
+        for (req in sortedReqs) {
+            val prev = nonOverlappingBatch.lastOrNull()
+            val clampedStart = if (prev != null) {
+                maxOf(req.timelineStartMs, prev.timelineStartMs + prev.durationMs)
+            } else {
+                req.timelineStartMs
+            }
+            val normalizedWords = UnifiedTextEngine.normalizeWords(req.spec.timedWords, req.durationMs)
+            nonOverlappingBatch += req.copy(
+                timelineStartMs = clampedStart,
+                spec = req.spec.copy(timedWords = normalizedWords),
+            )
+        }
+
+        fun trackHasConflict(track: TimelineTrack): Boolean {
+            return nonOverlappingBatch.any { req ->
+                val reqEnd = req.timelineStartMs + req.durationMs
+                track.clips.any { c ->
+                    val cEnd = c.timelineStartMs + c.durationMs
+                    req.timelineStartMs < cEnd && reqEnd > c.timelineStartMs
+                }
+            }
+        }
+
+        var workingDoc = document
+        val resolvedTrack: TimelineTrack = if (targetTrackId != null) {
+            val explicit = workingDoc.tracks.firstOrNull {
+                it.id == targetTrackId && it.type == TrackType.TEXT && !it.isLocked
+            } ?: return document to emptyList()
+            explicit
+        } else {
+            val unlockedTextTracks = workingDoc.tracks.filter { it.type == TrackType.TEXT && !it.isLocked }
+            val hasAnyTextTrack = workingDoc.tracks.any { it.type == TrackType.TEXT }
+            if (hasAnyTextTrack && unlockedTextTracks.isEmpty()) {
+                // Respect locked tracks strictly: do not bypass when all existing TEXT tracks are locked
+                return document to emptyList()
+            }
+            val cleanTrack = unlockedTextTracks.firstOrNull { !trackHasConflict(it) }
+            if (cleanTrack != null) {
+                cleanTrack
+            } else {
+                val (docWithTrack, newTrack) = addTrack(workingDoc, TrackType.TEXT, nowMs)
+                workingDoc = docWithTrack
+                newTrack ?: return document to emptyList()
+            }
+        }
+
+        val insertedClips = mutableListOf<TimelineClipRef>()
+        val existingOnTrack = resolvedTrack.clips.toMutableList()
+        for (req in nonOverlappingBatch) {
+            val placementStart = if (targetTrackId != null) {
+                resolveNonOverlappingStart(existingOnTrack, req.timelineStartMs, req.durationMs)
+            } else {
+                req.timelineStartMs
+            }
+            val newClip = TimelineClipRef(
+                clipId = UUID.randomUUID().toString(),
+                assetId = TEXT_ASSET_PLACEHOLDER_ID,
+                trackId = resolvedTrack.id,
+                timelineStartMs = placementStart,
+                sourceStartMs = 0L,
+                durationMs = req.durationMs,
+                sourceTotalDurationMs = MAX_IMAGE_CLIP_DURATION_MS,
+                clipKind = ClipKind.TEXT,
+                textSpec = req.spec,
+            )
+            insertedClips += newClip
+            existingOnTrack += newClip
+        }
+
+        val updatedTracks = workingDoc.tracks.map { track ->
+            if (track.id == resolvedTrack.id) {
+                track.copy(clips = existingOnTrack.sortedBy { it.timelineStartMs })
+            } else {
+                track
+            }
+        }
+        return workingDoc.copy(tracks = updatedTracks, updatedAt = nowMs) to insertedClips
     }
 
     fun updateClipSpeed(
@@ -1221,6 +1351,12 @@ class TimelineEngine(
             )
         }
 
+        val (leftTextSpec, rightTextSpec) = if (targetClip.clipKind == ClipKind.TEXT && targetClip.textSpec != null) {
+            UnifiedTextEngine.partitionSpecForSplit(targetClip.textSpec, leftDuration, rightDuration)
+        } else {
+            targetClip.textSpec to targetClip.textSpec
+        }
+
         val leftClip = targetClip.copy(
             sourceStartMs = leftSourceStart,
             durationMs = leftDuration,
@@ -1231,6 +1367,7 @@ class TimelineEngine(
             transitionIn = targetClip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(leftDuration))
             },
+            textSpec = leftTextSpec,
             keyframeTracks = leftTracks,
         )
         val rightClipId = UUID.randomUUID().toString()
@@ -1244,6 +1381,7 @@ class TimelineEngine(
             fadeInMs = 0L,
             fadeOutMs = targetClip.fadeOutMs.coerceAtMost(rightDuration),
             transitionIn = null,
+            textSpec = rightTextSpec,
             keyframeTracks = rightTracks,
         )
 
@@ -1319,6 +1457,11 @@ class TimelineEngine(
             }
         }
         val newDuration = clipEnd - clampedStart
+        val adjustedTextSpec = if (clip.clipKind == ClipKind.TEXT && clip.textSpec != null) {
+            UnifiedTextEngine.adjustSpecForTrimLeft(clip.textSpec, deltaTimeline, newDuration)
+        } else {
+            clip.textSpec
+        }
         val trimmed = clip.copy(
             timelineStartMs = clampedStart,
             sourceStartMs = newSourceStart,
@@ -1328,6 +1471,7 @@ class TimelineEngine(
             transitionIn = clip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(newDuration))
             },
+            textSpec = adjustedTextSpec,
             keyframeTracks = shiftAndClampKeyframes(clip.keyframeTracks, -deltaTimeline, newDuration),
         )
 
@@ -1403,6 +1547,12 @@ class TimelineEngine(
             clip.sourceStartMs
         }
 
+        val adjustedTextSpec = if (clip.clipKind == ClipKind.TEXT && clip.textSpec != null) {
+            UnifiedTextEngine.adjustSpecForTrimRight(clip.textSpec, newDuration)
+        } else {
+            clip.textSpec
+        }
+
         val trimmed = clip.copy(
             sourceStartMs = newSourceStart,
             durationMs = newDuration,
@@ -1411,6 +1561,7 @@ class TimelineEngine(
             transitionIn = clip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(newDuration))
             },
+            textSpec = adjustedTextSpec,
             keyframeTracks = shiftAndClampKeyframes(clip.keyframeTracks, 0L, newDuration),
         )
         val updatedTracks = document.tracks.map { track ->
@@ -1533,6 +1684,9 @@ class TimelineEngine(
         val duplicated = sourceClip.copy(
             clipId = duplicatedId,
             timelineStartMs = insertStart,
+            textSpec = sourceClip.textSpec?.let { spec ->
+                spec.copy(timedWords = spec.timedWords.map { w -> w.copy(id = UUID.randomUUID().toString()) })
+            },
         )
         val updatedTracks = document.tracks.map { track ->
             if (track.id == ownerTrack.id) {

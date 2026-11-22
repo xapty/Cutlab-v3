@@ -112,9 +112,13 @@ object ProjectSchemaMigrator {
         while (version < CURRENT_PROJECT_SCHEMA_VERSION) {
             current = when (version) {
                 0, 1 -> migrateV1ToV2(current)
+                2 -> migrateV2ToV3(current)
                 else -> current
             }
-            version = if (version < 1) 2 else version + 1
+            version = when {
+                version < 1 -> 2
+                else -> version + 1
+            }
         }
 
         return JsonSchemaMigrationOutput(
@@ -181,6 +185,47 @@ object ProjectSchemaMigrator {
             map["tracks"] = JsonArray(migratedTracks)
         } else {
             map["tracks"] = JsonArray(emptyList())
+        }
+
+        return JsonObject(map)
+    }
+
+    private fun migrateV2ToV3(v2: JsonObject): JsonObject {
+        val map = v2.toMutableMap()
+        map["schemaVersion"] = JsonPrimitive(3)
+
+        val tracksElem = map["tracks"]
+        if (tracksElem is JsonArray) {
+            val normalizedTracks = tracksElem.map { trackElem ->
+                val tObj = trackElem as? JsonObject ?: return@map trackElem
+                val tMap = tObj.toMutableMap()
+                val clipsElem = tMap["clips"]
+                if (clipsElem is JsonArray) {
+                    val normalizedClips = clipsElem.map { clipElem ->
+                        val cObj = clipElem as? JsonObject ?: return@map clipElem
+                        val textElem = cObj["textSpec"] as? JsonObject ?: return@map clipElem
+                        val specMap = textElem.toMutableMap()
+                        if (specMap["contentType"] == null) {
+                            specMap["contentType"] = JsonPrimitive(TextContentType.TITLE.name)
+                        }
+                        if (specMap["renderMode"] == null) {
+                            specMap["renderMode"] = JsonPrimitive(TextRenderMode.NORMAL.name)
+                        }
+                        if (specMap["karaokeMode"] == null) {
+                            specMap["karaokeMode"] = JsonPrimitive(KaraokeHighlightMode.NONE.name)
+                        }
+                        if (specMap["timedWords"] == null) {
+                            specMap["timedWords"] = JsonArray(emptyList())
+                        }
+                        val cMap = cObj.toMutableMap()
+                        cMap["textSpec"] = JsonObject(specMap)
+                        JsonObject(cMap)
+                    }
+                    tMap["clips"] = JsonArray(normalizedClips)
+                }
+                JsonObject(tMap)
+            }
+            map["tracks"] = JsonArray(normalizedTracks)
         }
 
         return JsonObject(map)

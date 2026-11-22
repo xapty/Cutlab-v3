@@ -241,6 +241,68 @@ object EffectsEngine {
         )
     }
 
+    fun defaultCaptionSpec(
+        text: String = "Caption line",
+        sourceLanguage: String? = null,
+    ): TextOverlaySpec = TextOverlaySpec(
+        text = text,
+        stylePreset = TextStylePreset.MINIMAL_SUBTITLE,
+        animationPreset = TextAnimationPreset.FADE_IN,
+        fontScale = 0.88f,
+        textColorArgb = 0xFFFFFFFF,
+        backgroundColorArgb = 0xCC0B0E14,
+        hasShadow = false,
+        hasStroke = true,
+        alignment = TextAlignMode.CENTER,
+        offsetY = 0.30f,
+        contentType = com.example.engine.project.TextContentType.CAPTION,
+        renderMode = com.example.engine.project.TextRenderMode.NORMAL,
+        karaokeMode = com.example.engine.project.KaraokeHighlightMode.ACTIVE_WORD,
+        highlightColorArgb = 0xFF38BDF8,
+        spokenColorArgb = 0xFFE2E8F0,
+        sourceLanguage = sourceLanguage,
+    )
+
+    fun defaultKaraokeLyricSpec(
+        text: String = "Sing along lyric",
+    ): TextOverlaySpec = TextOverlaySpec(
+        text = text,
+        stylePreset = TextStylePreset.BOLD_TITLE,
+        animationPreset = TextAnimationPreset.NONE,
+        fontScale = 1.08f,
+        textColorArgb = 0xFF94A3B8,
+        backgroundColorArgb = 0x660B0E14,
+        hasShadow = true,
+        hasStroke = true,
+        alignment = TextAlignMode.CENTER,
+        offsetY = 0.24f,
+        contentType = com.example.engine.project.TextContentType.LYRIC,
+        renderMode = com.example.engine.project.TextRenderMode.NORMAL,
+        karaokeMode = com.example.engine.project.KaraokeHighlightMode.PROGRESSIVE,
+        highlightColorArgb = 0xFFF59E0B,
+        spokenColorArgb = 0xFFFFFFFF,
+    )
+
+    fun defaultInvertLyricSpec(
+        text: String = "INVERT LYRIC",
+    ): TextOverlaySpec = TextOverlaySpec(
+        text = text,
+        stylePreset = TextStylePreset.BOLD_TITLE,
+        animationPreset = TextAnimationPreset.POP_OVERSHOOT,
+        fontScale = 1.32f,
+        textColorArgb = 0xFFFFFFFF,
+        backgroundColorArgb = 0x00000000,
+        hasShadow = false,
+        hasStroke = false,
+        alignment = TextAlignMode.CENTER,
+        offsetY = 0.0f,
+        contentType = com.example.engine.project.TextContentType.LYRIC,
+        renderMode = com.example.engine.project.TextRenderMode.INVERT_VIDEO,
+        invertStrength = 1.0f,
+        invertEdgeSoftness = 0.0f,
+        invertIncludeBackground = false,
+    )
+
     fun filterAccentColorArgb(preset: FilterPreset): Long = when (preset) {
         FilterPreset.NONE -> 0xFF64748B
         FilterPreset.CINEMATIC -> 0xFF0EA5E9

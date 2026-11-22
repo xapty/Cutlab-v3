@@ -2,7 +2,7 @@ package com.example.engine.project
 
 import kotlinx.serialization.Serializable
 
-const val CURRENT_PROJECT_SCHEMA_VERSION = 2
+const val CURRENT_PROJECT_SCHEMA_VERSION = 3
 
 @Serializable
 enum class EditorMode(val label: String, val subtitle: String) {
@@ -300,6 +300,36 @@ enum class TextAlignMode(val label: String) {
 }
 
 @Serializable
+enum class TextContentType(val label: String) {
+    TITLE("Title"),
+    CAPTION("Caption"),
+    LYRIC("Lyric"),
+}
+
+@Serializable
+enum class TextRenderMode(val label: String) {
+    NORMAL("Standard"),
+    INVERT_VIDEO("Invert Lyric"),
+}
+
+@Serializable
+enum class KaraokeHighlightMode(val label: String) {
+    NONE("Off"),
+    ACTIVE_WORD("Active Word"),
+    PROGRESSIVE("Progressive"),
+}
+
+@Serializable
+data class TimedTextWord(
+    val id: String,
+    val text: String,
+    val startMs: Long,
+    val endMs: Long,
+    val isEstimated: Boolean = false,
+    val confidence: Float = 1.0f,
+)
+
+@Serializable
 data class TextOverlaySpec(
     val text: String = "Your Title",
     val stylePreset: TextStylePreset = TextStylePreset.BOLD_TITLE,
@@ -312,6 +342,19 @@ data class TextOverlaySpec(
     val alignment: TextAlignMode = TextAlignMode.CENTER,
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
+    val contentType: TextContentType = TextContentType.TITLE,
+    val renderMode: TextRenderMode = TextRenderMode.NORMAL,
+    val timedWords: List<TimedTextWord> = emptyList(),
+    val karaokeMode: KaraokeHighlightMode = KaraokeHighlightMode.NONE,
+    val highlightColorArgb: Long = 0xFF38BDF8,
+    val spokenColorArgb: Long = 0xFFE2E8F0,
+    val wordSpacingEm: Float = 0f,
+    val invertStrength: Float = 1.0f,
+    val invertEdgeSoftness: Float = 0.08f,
+    val invertIncludeBackground: Boolean = false,
+    val sourceLanguage: String? = null,
+    val sourceAssetId: String? = null,
+    val isTimingEstimated: Boolean = false,
 )
 
 @Serializable
@@ -335,6 +378,7 @@ enum class KeyframeProperty(
     SHADER_INTENSITY("Shader FX", 0f, 1f, 0.5f, "%"),
     MASK_FEATHER("Feather", 0f, 0.5f, 0.08f, "%"),
     TEXT_FONT_SCALE("Text Size", 0.5f, 2.5f, 1f, "x"),
+    TEXT_INVERT_STRENGTH("Invert Strength", 0f, 1f, 1f, "%"),
 }
 
 @Serializable

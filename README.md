@@ -4,15 +4,21 @@ CutLab is a native Android video editing and motion-graphics studio built with *
 
 It unifies **Quick Edit** and **Advanced Edit** workspaces on top of one shared, non-destructive `ProjectDocument` schema so switching modes never discards edits.
 
-## Key Features (Phases 1 – 10)
+## Key Features (Phases 1 – 10 + Task 003)
 - **Quick & Advanced Workspaces**: Adaptive Portrait & Landscape Compose layouts preserving playhead, zoom, and selection across orientation changes.
 - **Multi-Track Timeline Engine**: Command-based 60-step Undo/Redo, drag-and-drop track placement, magnetic snapping (to clips, playhead, and beat markers), trim handles, split, duplicate, ripple delete, track mute/lock/reorder, and frame stepping.
+- **Intelligent Text, Karaoke & Invert Lyric GPU Engine (Task 003, Schema v3)**:
+  - Unified `TEXT` clips (`TITLE`, `CAPTION`, `LYRIC`) with clip-local `TimedTextWord` timestamps preserved across moves, trims, splits, and Room persistence.
+  - Word-level Karaoke highlighting (`NONE`, `ACTIVE_WORD`, `PROGRESSIVE`) synchronized identically across Compose live preview, timeline scrubbing, `-1F`/`+1F` stepping, and Path B export.
+  - **Invert Lyric GPU Shader (`INVERT_VIDEO`)**: GLSL ES 2.0 fragment shader inverting actual video framebuffer RGB pixels inside cached glyph masks across both live GL preview and Path B export, with strength (`0–100%`), edge softness, and background mask controls.
+  - **Manual Lyric Studio**: Paste or import `.txt` / LRC lyrics, edit/split/merge/reorder lines, waveform & beat scrubbing, tap-at-playhead line/word timing assignment, frame & beat snapping, offset shifting, and explicitly marked uniform word estimation (`Est.`).
+  - **Offline Auto Caption (`vosk-android`)**: On-device speech transcription of imported video/audio via streaming 16 kHz mono PCM decoding, explicit consented per-language model downloads (`en`, `es`, `fr`, `de`, `ja`) stored privately in `filesDir/asr_models/`, cue wrapping/editing, and single-undoable timeline batch insertion.
 - **OpenGL ES 2.0 + GLSL Multi-Layer Compositor**: Ping-pong FBO rendering, dual concurrent hardware OES video decoders, 7 blend modes, SDF alpha masks, adjustment layers, Chroma Key (YCbCr + spill suppression), 3D LUT color grading (`.cube` importer + 7 cinema presets), and custom GLSL shaders (`Chromatic Aberration`, `RGB Split`, `Film Grain`, `Bloom Glow`, `VHS Scanlines`, `Pixelate`, `Crisp Edge`, `Zoom Blur`, `Lens Warp`, `Halation`, `Neon Edge`).
 - **Animation & Motion Graphics Engine**: Multi-property keyframes, Newton-Raphson Cubic Bezier curves, interactive zoomable Graph Editor with draggable tangent handles, overshoot/bounce/elastic presets, and SAD optical motion tracking + camera stabilization.
 - **Multi-Track Audio Engine**: Background PCM waveform/beat extraction (`MediaExtractor` + `MediaCodec`), 4-slot synchronized playback, sample-rate-converted stereo PCM mixing (`AudioTrack` audition + export mix), Biquad Low/High Shelf EQ, Echo, and equal-power Stereo Panning.
 - **Dual-Path Export Engine**:
   - **Path A**: `Media3TransformerExporter` for fast hardware sequential exports.
-  - **Path B**: `CustomGlVideoExporter` for layered GLSL compositing, masks, LUTs, keyframes, text rendering, and mixed DSP audio.
+  - **Path B**: `CustomGlVideoExporter` for layered GLSL compositing, Invert Lyric masks, karaoke text, masks, LUTs, keyframes, and mixed DSP audio.
   - Validates every exported MP4 via `MediaExtractor` & `MediaMetadataRetriever` before reporting success, and supports Gallery (`MediaStore` API 29+ / SAF API 28) & `FileProvider` sharing.
 - **Optimization, Profiling & Release Hardening (Phase 10)**:
   - API 29+ thermal monitoring (`PowerManager`) with safe API 28 fallback.

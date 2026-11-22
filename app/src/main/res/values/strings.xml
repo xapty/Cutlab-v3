@@ -4,4 +4,10 @@
     <string name="nav_create">Create</string>
     <string name="nav_media">Media</string>
     <string name="nav_settings">Settings</string>
+    <string name="auto_caption_title">Auto Caption (Offline ASR)</string>
+    <string name="auto_caption_privacy_note">Audio stays on your device. Models are downloaded only when you tap Download.</string>
+    <string name="lyric_studio_title">Lyric Studio &amp; Sync</string>
+    <string name="invert_lyric_title">Invert Lyric GPU Mask</string>
+    <string name="invert_lyric_description">Inverts underlying video RGB pixels exclusively inside rendered text glyphs.</string>
+    <string name="karaoke_highlight_title">Karaoke Word Highlight</string>
 </resources>

@@ -220,6 +220,46 @@ object GlCompositorMath {
         }
     }
 
+    data class RgbaPixel(
+        val r: Float,
+        val g: Float,
+        val b: Float,
+        val a: Float,
+    )
+
+    /**
+     * Pure-Kotlin reference implementation matching [CompositorShaders.INVERT_TEXT_FRAGMENT_SHADER].
+     * Used for deterministic JVM verification of Invert Lyric RGB math & edge cases.
+     */
+    fun evaluateInvertLyricPixel(
+        baseR: Float,
+        baseG: Float,
+        baseB: Float,
+        baseA: Float,
+        maskAlpha: Float,
+        invertStrength: Float,
+        opacity: Float = 1f,
+    ): RgbaPixel {
+        val safeR = baseR.coerceIn(0f, 1f)
+        val safeG = baseG.coerceIn(0f, 1f)
+        val safeB = baseB.coerceIn(0f, 1f)
+        val safeA = baseA.coerceIn(0f, 1f)
+        val amount = (maskAlpha.coerceIn(0f, 1f) *
+            invertStrength.coerceIn(0f, 1f) *
+            opacity.coerceIn(0f, 1f)).coerceIn(0f, 1f)
+
+        val invR = 1f - safeR
+        val invG = 1f - safeG
+        val invB = 1f - safeB
+
+        return RgbaPixel(
+            r = safeR + (invR - safeR) * amount,
+            g = safeG + (invG - safeG) * amount,
+            b = safeB + (invB - safeB) * amount,
+            a = safeA,
+        )
+    }
+
     private fun rotateZInPlace(m: FloatArray, angleDeg: Float) {
         if (angleDeg == 0f) return
         val rad = angleDeg * (PI / 180.0)

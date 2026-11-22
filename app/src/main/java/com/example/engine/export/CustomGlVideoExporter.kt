@@ -39,6 +39,7 @@ import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectDocument
+import com.example.engine.project.TextRenderMode
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
 import com.example.engine.timeline.ActiveClipLayer
@@ -265,7 +266,7 @@ class CustomGlVideoExporter(
                     }
                 }
 
-                // 3. Text & kinetic typography layers above visuals with blend modes & transforms
+                // 3. Text, karaoke & Invert Lyric layers above visuals with matching GPU shaders
                 for (textLayer in resolved.textLayers) {
                     val spec = animationEngine.evaluateTextSpec(textLayer.clip, textLayer.clipRelativeMs) ?: continue
                     val animTransform = animationEngine.evaluateTransform(textLayer.clip, textLayer.clipRelativeMs)
@@ -277,12 +278,18 @@ class CustomGlVideoExporter(
                         canvasHeight = outH,
                     ) ?: continue
                     try {
-                        glEnv.compositeTextLayer(
-                            rendered = rendered,
-                            blendMode = textLayer.clip.blendMode,
-                        )
+                        if (spec.renderMode == TextRenderMode.INVERT_VIDEO) {
+                            glEnv.compositeInvertTextLayer(rendered = rendered)
+                        } else {
+                            glEnv.compositeTextLayer(
+                                rendered = rendered,
+                                blendMode = textLayer.clip.blendMode,
+                            )
+                        }
                     } finally {
-                        if (!rendered.bitmap.isRecycled) rendered.bitmap.recycle()
+                        if (!rendered.isCacheManaged && !rendered.bitmap.isRecycled) {
+                            rendered.bitmap.recycle()
+                        }
                     }
                 }
 
@@ -364,6 +371,7 @@ class CustomGlVideoExporter(
             imageBitmapCache.values.forEach { if (!it.isRecycled) it.recycle() }
             imageBitmapCache.clear()
             pcmChunkCache.clear()
+            textBitmapRenderer.clearCache()
         }
     }
 
@@ -648,6 +656,7 @@ class CustomGlVideoExporter(
         private var program2d = 0
         private var programBlend = 0
         private var programBlit = 0
+        private var programInvertText = 0
 
         private val fboIds = IntArray(3)
         private val fboTexIds = IntArray(3)
@@ -712,6 +721,7 @@ class CustomGlVideoExporter(
             program2d = linkProgram(CompositorShaders.LAYER_VERTEX_SHADER, CompositorShaders.LAYER_FRAGMENT_SHADER_2D)
             programBlend = linkProgram(CompositorShaders.BLIT_VERTEX_SHADER, CompositorShaders.BLEND_FRAGMENT_SHADER)
             programBlit = linkProgram(CompositorShaders.BLIT_VERTEX_SHADER, CompositorShaders.PASSTHROUGH_FRAGMENT_SHADER)
+            programInvertText = linkProgram(CompositorShaders.LAYER_VERTEX_SHADER, CompositorShaders.INVERT_TEXT_FRAGMENT_SHADER)
 
             GLES20.glGenFramebuffers(3, fboIds, 0)
             GLES20.glGenTextures(3, fboTexIds, 0)
@@ -971,6 +981,73 @@ class CustomGlVideoExporter(
             blendLayerFboIntoBase(blendMode.shaderId)
         }
 
+        fun compositeInvertTextLayer(
+            rendered: RenderedTextBitmapFrame,
+        ) {
+            val bmp = rendered.bitmap
+            if (bmp.isRecycled || programInvertText == 0) return
+
+            // 1. Copy base FBO pixels into scratch FBO so regions outside the text quad stay untouched
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[scratchBaseIdx])
+            GLES20.glViewport(0, 0, width, height)
+            GLES20.glUseProgram(programBlit)
+            bindQuadAttributes(programBlit)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[baseFboIdx])
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(programBlit, "uTexture"), 0)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            // 2. Run Invert Lyric shader reading fboTexIds[baseFboIdx] & glyph mask texture
+            GLES20.glUseProgram(programInvertText)
+            bindQuadAttributes(programInvertText)
+
+            val texMatrix = FloatArray(16).apply {
+                Matrix.setIdentityM(this, 0)
+                Matrix.translateM(this, 0, 0f, 1f, 0f)
+                Matrix.scaleM(this, 0, 1f, -1f, 1f)
+            }
+            val mvp = GlCompositorMath.buildTextLayerMvpMatrix(
+                bitmapWidth = bmp.width,
+                bitmapHeight = bmp.height,
+                canvasWidth = width,
+                canvasHeight = height,
+                centerOffsetXNorm = rendered.centerOffsetXNorm,
+                centerOffsetYNorm = rendered.centerOffsetYNorm,
+                combinedScaleX = rendered.combinedScaleX,
+                combinedScaleY = rendered.combinedScaleY,
+                rotationDeg = rendered.rotationDeg,
+                anchorX = rendered.anchorX,
+                anchorY = rendered.anchorY,
+            )
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(programInvertText, "uMvpMatrix"), 1, false, mvp, 0)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(programInvertText, "uTexMatrix"), 1, false, texMatrix, 0)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[baseFboIdx])
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(programInvertText, "uBaseTex"), 0)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, uploadTexId[0])
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(programInvertText, "uMaskTex"), 1)
+
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uInvertStrength"), rendered.invertStrength)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uEdgeSoftness"), rendered.invertEdgeSoftness)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uOpacity"), rendered.combinedAlpha)
+            GLES20.glUniform2f(
+                GLES20.glGetUniformLocation(programInvertText, "uMaskTexelSize"),
+                1f / bmp.width.coerceAtLeast(1),
+                1f / bmp.height.coerceAtLeast(1),
+            )
+
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+
+            val tmp = baseFboIdx
+            baseFboIdx = scratchBaseIdx
+            scratchBaseIdx = tmp
+        }
+
         fun submitFrame(ptsNs: Long) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, width, height)
@@ -1066,12 +1143,13 @@ class CustomGlVideoExporter(
                 GLES20.glDeleteTextures(3, fboTexIds, 0)
                 fboTexIds.fill(0)
             }
-            listOf(program2d, programBlend, programBlit).forEach {
+            listOf(program2d, programBlend, programBlit, programInvertText).forEach {
                 if (it != 0) GLES20.glDeleteProgram(it)
             }
             program2d = 0
             programBlend = 0
             programBlit = 0
+            programInvertText = 0
 
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)

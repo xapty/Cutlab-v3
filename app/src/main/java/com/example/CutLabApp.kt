@@ -250,6 +250,9 @@ fun CutLabApp(
                             exportCoordinator = appContainer.exportCoordinator,
                             proxyMediaManager = appContainer.proxyMediaManager,
                             appContext = appContainer.applicationContext,
+                            asrModelManager = appContainer.asrModelManager,
+                            speechRecognitionEngine = appContainer.speechRecognitionEngine,
+                            lyricRecognitionProvider = appContainer.lyricRecognitionProvider,
                         ),
                     )
                     ProjectWorkspaceScreen(

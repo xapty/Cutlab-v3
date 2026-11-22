@@ -176,6 +176,24 @@ class ExportPlannerTest {
                 StabilizationSpec(enabled = true, strength = 0.75f, cropScale = 1.12f),
                 emptyList(),
             ),
+            "Invert Lyric" to timelineEngine.insertTextClip(
+                baseDoc,
+                EffectsEngine.defaultTextSpec(TextStylePreset.BOLD_TITLE).copy(
+                    text = "INVERT LYRIC",
+                    contentType = com.example.engine.project.TextContentType.LYRIC,
+                    renderMode = com.example.engine.project.TextRenderMode.INVERT_VIDEO,
+                    invertStrength = 1.0f,
+                ),
+            ).first,
+            "Karaoke Timed Words" to timelineEngine.insertTextClip(
+                baseDoc,
+                EffectsEngine.defaultKaraokeLyricSpec("Sing along").copy(
+                    timedWords = listOf(
+                        com.example.engine.project.TimedTextWord("kw1", "Sing", 0L, 900L),
+                        com.example.engine.project.TimedTextWord("kw2", "along", 900L, 1_800L),
+                    ),
+                ),
+            ).first,
         )
 
         for ((label, mutatedDoc) in cases) {

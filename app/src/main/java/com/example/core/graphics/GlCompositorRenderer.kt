@@ -19,13 +19,17 @@ import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
+import com.example.engine.animation.AnimationEngine
 import com.example.engine.compositor.ResolvedCompositionFrame
 import com.example.engine.compositor.ResolvedVisualLayer
 import com.example.engine.effects.Lut3DEngine
+import com.example.engine.export.RenderedTextBitmapFrame
+import com.example.engine.export.TextLayerBitmapRenderer
 import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
+import com.example.engine.project.TextRenderMode
 import com.example.engine.project.TransitionType
 import java.io.File
 import java.nio.ByteBuffer
@@ -59,6 +63,10 @@ class GlCompositorRenderer(
     private var programOes = 0
     private var programBlend = 0
     private var programBlit = 0
+    private var programInvertText = 0
+
+    private val animationEngine = AnimationEngine()
+    private val textBitmapRenderer = TextLayerBitmapRenderer(context)
 
     private val fboIds = IntArray(3)
     private val fboTexIds = IntArray(3)
@@ -85,6 +93,15 @@ class GlCompositorRenderer(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean {
             if (size > 8 && eldest != null) {
                 GLES20.glDeleteTextures(1, intArrayOf(eldest.value), 0)
+                return true
+            }
+            return false
+        }
+    }
+    private val textMaskTextureCache = object : LinkedHashMap<String, CachedGlTexture>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedGlTexture>?): Boolean {
+            if (size > 16 && eldest != null) {
+                GLES20.glDeleteTextures(1, intArrayOf(eldest.value.texId), 0)
                 return true
             }
             return false
@@ -175,6 +192,11 @@ class GlCompositorRenderer(
                     GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
                 }
                 lutTextureCache.clear()
+                textMaskTextureCache.values.forEach { cached ->
+                    GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
+                }
+                textMaskTextureCache.clear()
+                textBitmapRenderer.clearCache()
             } else {
                 while (imageTextureCache.size > 3) {
                     val eldestKey = imageTextureCache.keys.firstOrNull() ?: break
@@ -273,6 +295,7 @@ class GlCompositorRenderer(
         programOes = linkProgram(CompositorShaders.LAYER_VERTEX_SHADER, CompositorShaders.LAYER_FRAGMENT_SHADER_OES)
         programBlend = linkProgram(CompositorShaders.BLIT_VERTEX_SHADER, CompositorShaders.BLEND_FRAGMENT_SHADER)
         programBlit = linkProgram(CompositorShaders.BLIT_VERTEX_SHADER, CompositorShaders.PASSTHROUGH_FRAGMENT_SHADER)
+        programInvertText = linkProgram(CompositorShaders.LAYER_VERTEX_SHADER, CompositorShaders.INVERT_TEXT_FRAGMENT_SHADER)
 
         GLES20.glGenTextures(2, videoTexIds, 0)
         for (i in 0..1) {
@@ -420,6 +443,33 @@ class GlCompositorRenderer(
                     baseFboIdx = scratchBaseIdx
                     scratchBaseIdx = tmp
                 }
+            }
+
+            // Composite GPU Invert Lyric text mask layers directly against underlying video pixels
+            for (textLayer in frame.textLayers) {
+                val evaluatedSpec = animationEngine.evaluateTextSpec(textLayer.clip, textLayer.clipRelativeMs)
+                    ?: continue
+                if (evaluatedSpec.renderMode != TextRenderMode.INVERT_VIDEO) continue
+                val animTransform = animationEngine.evaluateTransform(textLayer.clip, textLayer.clipRelativeMs)
+                val renderedMask = textBitmapRenderer.render(
+                    spec = evaluatedSpec,
+                    transform = animTransform,
+                    clipRelativeMs = textLayer.clipRelativeMs,
+                    canvasWidth = frame.canvasWidth,
+                    canvasHeight = frame.canvasHeight,
+                ) ?: continue
+                val maskTex = getOrUploadTextMaskTexture(renderedMask) ?: continue
+                compositeInvertTextIntoBase(
+                    rendered = renderedMask,
+                    maskTex = maskTex,
+                    baseTexId = fboTexIds[baseFboIdx],
+                    outFboId = fboIds[scratchBaseIdx],
+                    canvasWidth = frame.canvasWidth,
+                    canvasHeight = frame.canvasHeight,
+                )
+                val tmp = baseFboIdx
+                baseFboIdx = scratchBaseIdx
+                scratchBaseIdx = tmp
             }
         }
 
@@ -629,6 +679,97 @@ class GlCompositorRenderer(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
 
+    private fun getOrUploadTextMaskTexture(rendered: RenderedTextBitmapFrame): CachedGlTexture? {
+        val key = rendered.cacheKey
+        if (key.isNotEmpty()) {
+            textMaskTextureCache[key]?.let { return it }
+        }
+        val bmp = rendered.bitmap
+        if (bmp.isRecycled) return null
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        val texId = texIds[0]
+        if (texId == 0) return null
+
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+
+        val cached = CachedGlTexture(texId, bmp.width, bmp.height)
+        if (key.isNotEmpty()) {
+            textMaskTextureCache[key] = cached
+        }
+        return cached
+    }
+
+    private fun compositeInvertTextIntoBase(
+        rendered: RenderedTextBitmapFrame,
+        maskTex: CachedGlTexture,
+        baseTexId: Int,
+        outFboId: Int,
+        canvasWidth: Int,
+        canvasHeight: Int,
+    ) {
+        if (programInvertText == 0) return
+        // 1. Blit existing base FBO pixels into scratch target so area outside the text quad stays intact
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFboId)
+        GLES20.glViewport(0, 0, fboWidth, fboHeight)
+        GLES20.glUseProgram(programBlit)
+        bindQuadAttributes(programBlit)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, baseTexId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(programBlit, "uTexture"), 0)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        // 2. Draw text mask quad sampling both base video pixels & glyph mask texture
+        GLES20.glUseProgram(programInvertText)
+        bindQuadAttributes(programInvertText)
+
+        val texMatrix = FloatArray(16).apply {
+            Matrix.setIdentityM(this, 0)
+            Matrix.translateM(this, 0, 0f, 1f, 0f)
+            Matrix.scaleM(this, 0, 1f, -1f, 1f)
+        }
+        val mvp = GlCompositorMath.buildTextLayerMvpMatrix(
+            bitmapWidth = maskTex.width,
+            bitmapHeight = maskTex.height,
+            canvasWidth = canvasWidth,
+            canvasHeight = canvasHeight,
+            centerOffsetXNorm = rendered.centerOffsetXNorm,
+            centerOffsetYNorm = rendered.centerOffsetYNorm,
+            combinedScaleX = rendered.combinedScaleX,
+            combinedScaleY = rendered.combinedScaleY,
+            rotationDeg = rendered.rotationDeg,
+            anchorX = rendered.anchorX,
+            anchorY = rendered.anchorY,
+        )
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(programInvertText, "uMvpMatrix"), 1, false, mvp, 0)
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(programInvertText, "uTexMatrix"), 1, false, texMatrix, 0)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, baseTexId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(programInvertText, "uBaseTex"), 0)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex.texId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(programInvertText, "uMaskTex"), 1)
+
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uInvertStrength"), rendered.invertStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uEdgeSoftness"), rendered.invertEdgeSoftness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(programInvertText, "uOpacity"), rendered.combinedAlpha)
+        GLES20.glUniform2f(
+            GLES20.glGetUniformLocation(programInvertText, "uMaskTexelSize"),
+            1f / maskTex.width.coerceAtLeast(1),
+            1f / maskTex.height.coerceAtLeast(1),
+        )
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+    }
+
     private fun getOrLoadImageTexture(asset: MediaAsset): CachedGlTexture? {
         val key = asset.playbackUri
         imageTextureCache[key]?.let { return it }
@@ -752,19 +893,25 @@ class GlCompositorRenderer(
             GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
         }
         lutTextureCache.clear()
+        textMaskTextureCache.values.forEach { cached ->
+            GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
+        }
+        textMaskTextureCache.clear()
+        textBitmapRenderer.clearCache()
         if (dummyLutTexId != 0) {
             GLES20.glDeleteTextures(1, intArrayOf(dummyLutTexId), 0)
             dummyLutTexId = 0
         }
         deleteFbos()
 
-        listOf(program2d, programOes, programBlend, programBlit).forEach {
+        listOf(program2d, programOes, programBlend, programBlit, programInvertText).forEach {
             if (it != 0) GLES20.glDeleteProgram(it)
         }
         program2d = 0
         programOes = 0
         programBlend = 0
         programBlit = 0
+        programInvertText = 0
 
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)

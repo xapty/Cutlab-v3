@@ -68,11 +68,15 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -92,6 +96,7 @@ import com.example.engine.animation.AnimationEngine
 import com.example.engine.compositor.CompositorEngine
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.KaraokeHighlightMode
 import com.example.engine.project.LayerTransform
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
@@ -100,7 +105,10 @@ import com.example.engine.project.ProjectDocument
 import com.example.engine.project.TextAlignMode
 import com.example.engine.project.TextAnimationPreset
 import com.example.engine.project.TextOverlaySpec
+import com.example.engine.project.TextRenderMode
 import com.example.engine.project.TextStylePreset
+import com.example.engine.text.UnifiedTextEngine
+import com.example.engine.text.WordPlaybackState
 import com.example.engine.timeline.ActiveClipLayer
 import com.example.engine.timeline.ActiveTimelineFrame
 import com.example.engine.timeline.SpeedRampEngine
@@ -373,7 +381,10 @@ fun TimelinePreviewMonitor(
     val anyVisualAssetMissing = resolvedComposition.layers.any {
         it.asset != null && it.asset.status != MediaStatus.READY
     }
-    val hasVisualContent = resolvedComposition.layers.isNotEmpty()
+    val hasInvertLyric = activeFrame.textLayers.any {
+        it.clip.textSpec?.renderMode == TextRenderMode.INVERT_VIDEO
+    }
+    val hasVisualContent = resolvedComposition.layers.isNotEmpty() || hasInvertLyric
 
     Column(
         modifier = modifier
@@ -465,11 +476,11 @@ fun TimelinePreviewMonitor(
                     )
                 }
 
-                // Active Text & Kinetic Typography Layers rendered above GL stage
+                // Active Text & Kinetic Typography Layers (NORMAL mode in Compose; INVERT_VIDEO is composited by GL)
                 activeFrame.textLayers.forEach { textLayer ->
                     val animatedSpec = animationEngine.evaluateTextSpec(textLayer.clip, textLayer.clipRelativeMs)
                     val animatedTransform = animationEngine.evaluateTransform(textLayer.clip, textLayer.clipRelativeMs)
-                    if (animatedSpec != null) {
+                    if (animatedSpec != null && animatedSpec.renderMode != TextRenderMode.INVERT_VIDEO) {
                         RenderedTextOverlay(
                             spec = animatedSpec,
                             transform = animatedTransform,
@@ -707,15 +718,27 @@ private fun RenderedTextOverlay(
     val rawAnimT = (clipRelativeMs.toFloat() / animWindowMs).coerceIn(0f, 1f)
     val eased = EffectsEngine.applyEasing(rawAnimT, com.example.engine.project.EasingPreset.EASE_OUT)
 
-    val displayText = when (spec.animationPreset) {
-        TextAnimationPreset.TYPEWRITER -> {
-            val charCount = ((spec.text.length) * (clipRelativeMs.toFloat() / 900f).coerceIn(0.05f, 1f))
-                .roundToInt()
-                .coerceIn(1, spec.text.length.coerceAtLeast(1))
-            if (spec.text.isEmpty()) "" else spec.text.take(charCount)
-        }
-        else -> spec.text
+    val karaokeEval = remember(spec, clipRelativeMs) {
+        UnifiedTextEngine.evaluateKaraoke(spec, clipRelativeMs)
     }
+    val fullPlainText = remember(spec.text, karaokeEval) {
+        if (karaokeEval.hasTimedWords) {
+            karaokeEval.words.joinToString(" ") { it.word.text }
+        } else {
+            spec.text
+        }
+    }
+    val visibleCharCount = when (spec.animationPreset) {
+        TextAnimationPreset.TYPEWRITER -> {
+            if (fullPlainText.isEmpty()) 0 else {
+                (fullPlainText.length * (clipRelativeMs.toFloat() / 900f).coerceIn(0.05f, 1f))
+                    .roundToInt()
+                    .coerceIn(1, fullPlainText.length)
+            }
+        }
+        else -> fullPlainText.length
+    }
+    val displayText = if (visibleCharCount <= 0) "" else fullPlainText.take(visibleCharCount)
 
     val animAlpha = when (spec.animationPreset) {
         TextAnimationPreset.FADE_IN, TextAnimationPreset.SLIDE_UP -> eased
@@ -779,6 +802,59 @@ private fun RenderedTextOverlay(
         BlendModePreset.LIGHTEN -> BlendMode.Lighten
     }
 
+    val annotatedDisplayText: AnnotatedString = remember(
+        spec,
+        displayText,
+        karaokeEval,
+        visibleCharCount,
+        baseSize,
+    ) {
+        val spacingExtraSp = if (spec.wordSpacingEm > 0.01f) {
+            (baseSize.value * spec.wordSpacingEm.coerceIn(0f, 1.5f) * 0.65f).sp
+        } else {
+            0.sp
+        }
+        buildAnnotatedString {
+            if (!karaokeEval.hasTimedWords || spec.karaokeMode == KaraokeHighlightMode.NONE) {
+                if (spacingExtraSp.value <= 0.05f) {
+                    append(displayText)
+                } else {
+                    displayText.forEach { ch ->
+                        if (ch == ' ') {
+                            withStyle(SpanStyle(letterSpacing = spacingExtraSp)) { append(" ") }
+                        } else {
+                            append(ch)
+                        }
+                    }
+                }
+            } else {
+                var remaining = visibleCharCount
+                karaokeEval.words.forEachIndexed { idx, evalWord ->
+                    if (remaining <= 0) return@forEachIndexed
+                    if (idx > 0) {
+                        if (spacingExtraSp.value > 0.05f) {
+                            withStyle(SpanStyle(letterSpacing = spacingExtraSp)) { append(" ") }
+                        } else {
+                            append(" ")
+                        }
+                        remaining -= 1
+                        if (remaining <= 0) return@forEachIndexed
+                    }
+                    val wordChunk = evalWord.word.text.take(remaining)
+                    remaining -= wordChunk.length
+                    val wordColor = when (evalWord.state) {
+                        WordPlaybackState.ACTIVE -> Color(spec.highlightColorArgb.toInt())
+                        WordPlaybackState.SPOKEN -> Color(spec.spokenColorArgb.toInt())
+                        WordPlaybackState.INACTIVE -> textColor
+                    }
+                    withStyle(SpanStyle(color = wordColor)) {
+                        append(wordChunk)
+                    }
+                }
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .offset { IntOffset(offsetPxX, offsetPxY) }
@@ -811,7 +887,7 @@ private fun RenderedTextOverlay(
     ) {
         if (spec.hasStroke) {
             Text(
-                text = displayText,
+                text = annotatedDisplayText,
                 textAlign = textAlign,
                 style = TextStyle(
                     fontFamily = fontFamily,
@@ -826,7 +902,7 @@ private fun RenderedTextOverlay(
             )
         }
         Text(
-            text = displayText,
+            text = annotatedDisplayText,
             textAlign = textAlign,
             style = TextStyle(
                 fontFamily = fontFamily,

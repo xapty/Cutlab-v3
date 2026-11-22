@@ -6,16 +6,20 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import com.example.engine.asr.PcmStreamSummary
+import com.example.engine.asr.StreamingMono16kResampler
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -23,7 +27,7 @@ import kotlin.math.max
  * Extracts normalized waveform envelopes, beat timestamps, and bounded PCM segments
  * from video/audio assets using MediaExtractor + MediaCodec without loading entire files into RAM.
  */
-class PcmAudioExtractor(
+open class PcmAudioExtractor(
     private val context: Context,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -263,6 +267,157 @@ class PcmAudioExtractor(
             )
         } catch (_: Throwable) {
             null
+        } finally {
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            runCatching { extractor.release() }
+        }
+    }
+
+    /**
+     * Streams decoded audio from [asset] in bounded 16 kHz mono PCM-16 chunks without loading the
+     * full audio track into RAM. Preserves continuous sample timestamps across chunks and handles
+     * coroutine cancellation, silence, and missing audio tracks cleanly.
+     */
+    open suspend fun streamMonoPcm16kChunks(
+        asset: MediaAsset,
+        chunkSamplesCount: Int = 16_000,
+        onProgress: (Float) -> Unit = {},
+        onChunk: suspend (samples16k: ShortArray, chunkStartMs: Long) -> Unit,
+    ): PcmStreamSummary = withContext(Dispatchers.IO) {
+        if (asset.type == MediaType.IMAGE || asset.status != MediaStatus.READY) {
+            return@withContext PcmStreamSummary(0, 0L, 0L, hasAudioTrack = false, peakAmplitude = 0f)
+        }
+        val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
+        try {
+            if (!setExtractorSource(extractor, asset)) {
+                return@withContext PcmStreamSummary(0, 0L, 0L, hasAudioTrack = false, peakAmplitude = 0f)
+            }
+            val audioTrackIdx = findAudioTrackIndex(extractor)
+            if (audioTrackIdx < 0) {
+                return@withContext PcmStreamSummary(0, 0L, 0L, hasAudioTrack = false, peakAmplitude = 0f)
+            }
+
+            extractor.selectTrack(audioTrackIdx)
+            val inputFormat = extractor.getTrackFormat(audioTrackIdx)
+            val mime = inputFormat.getString(MediaFormat.KEY_MIME)
+                ?: return@withContext PcmStreamSummary(0, 0L, 0L, hasAudioTrack = false, peakAmplitude = 0f)
+            var sampleRate = inputFormat.integerOrDefault(MediaFormat.KEY_SAMPLE_RATE, 44_100)
+            var channelCount = inputFormat.integerOrDefault(MediaFormat.KEY_CHANNEL_COUNT, 2)
+            var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
+            val durationUs = if (inputFormat.containsKey(MediaFormat.KEY_DURATION)) {
+                inputFormat.getLong(MediaFormat.KEY_DURATION).coerceAtLeast(1_000L)
+            } else {
+                (asset.durationMs.coerceAtLeast(1_000L) * 1_000L)
+            }
+
+            codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(inputFormat, null, null, 0)
+            codec.start()
+
+            var resampler = StreamingMono16kResampler(sampleRate, channelCount)
+            val bufferInfo = MediaCodec.BufferInfo()
+            var sawInputEos = false
+            var sawOutputEos = false
+
+            val safeChunkSize = chunkSamplesCount.coerceIn(1_600, 48_000)
+            val staging = ShortArray(safeChunkSize)
+            var stagingCount = 0
+            var totalSamplesWritten = 0L
+            var chunksProcessed = 0
+            var peakAmplitude = 0f
+
+            suspend fun emitStagingChunk() {
+                if (stagingCount <= 0) return
+                val outSlice = if (stagingCount == safeChunkSize) staging.copyOf() else staging.copyOf(stagingCount)
+                val startMs = (totalSamplesWritten * 1_000L) / StreamingMono16kResampler.TARGET_SAMPLE_RATE_HZ
+                onChunk(outSlice, startMs)
+                totalSamplesWritten += outSlice.size.toLong()
+                chunksProcessed++
+                stagingCount = 0
+            }
+
+            while (!sawOutputEos) {
+                coroutineContext.ensureActive()
+                if (!sawInputEos) {
+                    val inIdx = codec.dequeueInputBuffer(10_000L)
+                    if (inIdx >= 0) {
+                        val inBuf = codec.getInputBuffer(inIdx)
+                        val sampleSize = if (inBuf != null) extractor.readSampleData(inBuf, 0) else -1
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            sawInputEos = true
+                        } else {
+                            val ptsUs = extractor.sampleTime.coerceAtLeast(0L)
+                            codec.queueInputBuffer(inIdx, 0, sampleSize, ptsUs, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val outIdx = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
+                when {
+                    outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val outFmt = codec.outputFormat
+                        sampleRate = outFmt.integerOrDefault(MediaFormat.KEY_SAMPLE_RATE, sampleRate)
+                        channelCount = outFmt.integerOrDefault(MediaFormat.KEY_CHANNEL_COUNT, channelCount)
+                        if (outFmt.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                            pcmEncoding = outFmt.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                        }
+                        resampler = StreamingMono16kResampler(sampleRate, channelCount)
+                    }
+                    outIdx >= 0 -> {
+                        val outBuf = codec.getOutputBuffer(outIdx)
+                        if (outBuf != null && bufferInfo.size > 0) {
+                            outBuf.position(bufferInfo.offset)
+                            outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                            val mono16k = if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                                val floatBuf = outBuf.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+                                val arr = FloatArray(floatBuf.remaining())
+                                floatBuf.get(arr)
+                                resampler.processInterleavedFloats(arr)
+                            } else {
+                                val shortBuf = outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                                val arr = ShortArray(shortBuf.remaining())
+                                shortBuf.get(arr)
+                                resampler.processInterleavedShorts(arr)
+                            }
+
+                            var offset = 0
+                            while (offset < mono16k.size) {
+                                val sample = mono16k[offset]
+                                val amp = abs(sample.toInt() / 32768f)
+                                if (amp > peakAmplitude) peakAmplitude = amp
+                                staging[stagingCount++] = sample
+                                offset++
+                                if (stagingCount >= safeChunkSize) {
+                                    emitStagingChunk()
+                                }
+                            }
+
+                            val progress = (bufferInfo.presentationTimeUs.toFloat() / durationUs.toFloat())
+                                .coerceIn(0f, 0.99f)
+                            onProgress(progress)
+                        }
+                        codec.releaseOutputBuffer(outIdx, false)
+                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            sawOutputEos = true
+                        }
+                    }
+                }
+            }
+
+            emitStagingChunk()
+            onProgress(1f)
+            val totalDurationMs = (totalSamplesWritten * 1_000L) / StreamingMono16kResampler.TARGET_SAMPLE_RATE_HZ
+            PcmStreamSummary(
+                chunksProcessed = chunksProcessed,
+                totalSamples16k = totalSamplesWritten,
+                totalDurationMs = totalDurationMs,
+                hasAudioTrack = true,
+                peakAmplitude = peakAmplitude,
+            )
         } finally {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }

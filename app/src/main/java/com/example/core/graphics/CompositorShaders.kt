@@ -348,4 +348,45 @@ object CompositorShaders {
             gl_FragColor = texture2D(uTexture, vTexCoord);
         }
     """
+
+    /**
+     * GPU Invert Lyric fragment shader.
+     * Samples the composited video framebuffer via vCanvasUv and the transparent glyph mask via
+     * vTexCoord, inverting underlying RGB pixels strictly proportionally to mask coverage and uInvertStrength.
+     */
+    const val INVERT_TEXT_FRAGMENT_SHADER = """
+        precision mediump float;
+        varying vec2 vTexCoord;
+        varying vec2 vCanvasUv;
+
+        uniform sampler2D uBaseTex;
+        uniform sampler2D uMaskTex;
+        uniform float uInvertStrength;
+        uniform float uEdgeSoftness;
+        uniform float uOpacity;
+        uniform vec2 uMaskTexelSize;
+
+        void main() {
+            vec4 base = texture2D(uBaseTex, clamp(vCanvasUv, 0.0, 1.0));
+            if (vTexCoord.x < 0.0 || vTexCoord.x > 1.0 || vTexCoord.y < 0.0 || vTexCoord.y > 1.0) {
+                gl_FragColor = base;
+                return;
+            }
+            float centerA = texture2D(uMaskTex, vTexCoord).a;
+            float maskA = centerA;
+            if (uEdgeSoftness > 0.005) {
+                vec2 stepUv = uMaskTexelSize * (1.0 + uEdgeSoftness * 8.0);
+                float n = texture2D(uMaskTex, clamp(vTexCoord + vec2(0.0, stepUv.y), 0.0, 1.0)).a;
+                float s = texture2D(uMaskTex, clamp(vTexCoord - vec2(0.0, stepUv.y), 0.0, 1.0)).a;
+                float e = texture2D(uMaskTex, clamp(vTexCoord + vec2(stepUv.x, 0.0), 0.0, 1.0)).a;
+                float w = texture2D(uMaskTex, clamp(vTexCoord - vec2(stepUv.x, 0.0), 0.0, 1.0)).a;
+                float softBlur = centerA * 0.40 + (n + s + e + w) * 0.15;
+                maskA = mix(centerA, softBlur, clamp(uEdgeSoftness * 2.0, 0.0, 1.0));
+            }
+            float amount = clamp(maskA * clamp(uInvertStrength, 0.0, 1.0) * clamp(uOpacity, 0.0, 1.0), 0.0, 1.0);
+            vec3 inverted = vec3(1.0) - base.rgb;
+            vec3 outRgb = mix(base.rgb, inverted, amount);
+            gl_FragColor = vec4(outRgb, base.a);
+        }
+    """
 }

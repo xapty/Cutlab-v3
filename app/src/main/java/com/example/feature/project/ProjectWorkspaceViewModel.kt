@@ -12,6 +12,10 @@ import com.example.core.media.ProxyJobState
 import com.example.core.media.ProxyMediaManager
 import com.example.engine.animation.AnimationEngine
 import com.example.engine.animation.TrackedMotionPoint
+import com.example.engine.asr.AsrModelManager
+import com.example.engine.asr.DeferredExperimentalLyricProvider
+import com.example.engine.asr.LyricRecognitionProvider
+import com.example.engine.asr.SpeechRecognitionEngine
 import com.example.engine.audio.MasterAudioMixState
 import com.example.engine.audio.MixedAudioPreviewPlayer
 import com.example.engine.audio.MultiTrackAudioMixer
@@ -39,6 +43,7 @@ import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
 import com.example.engine.project.ExportSettingsSpec
+import com.example.engine.project.KaraokeHighlightMode
 import com.example.engine.project.KeyframeInterpolation
 import com.example.engine.project.KeyframeProperty
 import com.example.engine.project.LayerMask
@@ -54,6 +59,7 @@ import com.example.engine.project.SpeedPoint
 import com.example.engine.project.SpeedRampPreset
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
+import com.example.engine.project.TimedTextWord
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
@@ -79,6 +85,8 @@ enum class InspectorTab(val label: String) {
     MEDIA("Media"),
     INSPECTOR("Inspector"),
     TOOLS("FX & Text"),
+    CAPTIONS("Captions"),
+    LYRICS("Lyrics"),
     COMPOSITOR("Compositor"),
     ANIMATION("Animate"),
     AUDIO("Audio"),
@@ -136,6 +144,8 @@ private data class AudioAndExportBundle(
     val isAuditioningMix: Boolean,
     val exportUi: ExportUiBundle,
     val mediaProxy: MediaProxyStateBundle,
+    val autoCaption: AutoCaptionUiState,
+    val lyricStudio: LyricStudioUiState,
 )
 
 data class ProjectWorkspaceUiState(
@@ -176,6 +186,8 @@ data class ProjectWorkspaceUiState(
     val proxyJobState: ProxyJobState = ProxyJobState.Idle,
     val isMotionAnalysisRunning: Boolean = false,
     val lastMotionTrackPoints: List<TrackedMotionPoint> = emptyList(),
+    val autoCaptionState: AutoCaptionUiState = AutoCaptionUiState(),
+    val lyricStudioState: LyricStudioUiState = LyricStudioUiState(),
     val isReadOnlyFutureVersion: Boolean = false,
     val detectedSchemaVersion: Int = CURRENT_PROJECT_SCHEMA_VERSION,
     val unsupportedFutureKeys: Set<String> = emptySet(),
@@ -197,6 +209,9 @@ class ProjectWorkspaceViewModel(
     private val exportCoordinator: CutLabExportCoordinator? = null,
     private val proxyMediaManager: ProxyMediaManager? = null,
     private val appContext: Context? = null,
+    private val asrModelManager: AsrModelManager? = null,
+    private val speechRecognitionEngine: SpeechRecognitionEngine? = null,
+    private val lyricRecognitionProvider: LyricRecognitionProvider = DeferredExperimentalLyricProvider(),
 ) : ViewModel() {
 
     private val playheadMs = MutableStateFlow(0L)
@@ -239,6 +254,15 @@ class ProjectWorkspaceViewModel(
         exportPlanner = exportPlanner,
         exportOutputManager = exportOutputManager,
         exportCoordinator = exportCoordinator,
+        emitMessage = { _messages.emit(it) },
+    )
+    private val captionLyricCoordinator = WorkspaceCaptionLyricCoordinator(
+        scope = viewModelScope,
+        pcmAudioExtractor = pcmAudioExtractor,
+        asrModelManager = asrModelManager ?: appContext?.let { AsrModelManager(it) },
+        speechRecognitionEngine = speechRecognitionEngine,
+        lyricRecognitionProvider = lyricRecognitionProvider,
+        appContext = appContext,
         emitMessage = { _messages.emit(it) },
     )
 
@@ -337,7 +361,7 @@ class ProjectWorkspaceViewModel(
         )
     }
 
-    private val audioAndExportState = combine(
+    private val audioAndExportAux = combine(
         mediaAnalysisCoordinator.waveformsByAssetId,
         audioCoordinator.isAuditioningMix,
         exportUiState,
@@ -348,6 +372,19 @@ class ProjectWorkspaceViewModel(
             isAuditioningMix = auditioning,
             exportUi = exportBundle,
             mediaProxy = proxyBundle,
+            autoCaption = AutoCaptionUiState(),
+            lyricStudio = LyricStudioUiState(),
+        )
+    }
+
+    private val audioAndExportState = combine(
+        audioAndExportAux,
+        captionLyricCoordinator.autoCaptionState,
+        captionLyricCoordinator.lyricStudioState,
+    ) { base, captionState, lyricState ->
+        base.copy(
+            autoCaption = captionState,
+            lyricStudio = lyricState,
         )
     }
 
@@ -482,6 +519,8 @@ class ProjectWorkspaceViewModel(
             proxyJobState = proxyState,
             isMotionAnalysisRunning = motionBusy,
             lastMotionTrackPoints = motionPoints,
+            autoCaptionState = extra.autoCaption,
+            lyricStudioState = extra.lyricStudio,
             isReadOnlyFutureVersion = isReadOnlyFuture,
             detectedSchemaVersion = detectedSchema,
             unsupportedFutureKeys = futureKeys,
@@ -1683,6 +1722,248 @@ class ProjectWorkspaceViewModel(
         mediaAnalysisCoordinator.deleteProxy(uiState.value.selectedClipAsset)
     }
 
+    // --- Task 003: Unified Text, Karaoke, Invert Lyric, Auto Caption & Lyric Studio ---
+
+    fun addCustomTextClip(
+        spec: TextOverlaySpec,
+        actionLabel: String = "Add Text",
+        atPlayhead: Boolean = true,
+    ) {
+        if (!guardWritableOrEmit()) return
+        val doc = uiState.value.project ?: return
+        val startMs = if (atPlayhead) playheadMs.value else null
+        val (updated, created) = timelineEngine.insertTextClip(
+            document = doc,
+            spec = spec,
+            targetTrackId = selectedTrackId.value.takeIf { id ->
+                doc.tracks.firstOrNull { it.id == id }?.type == TrackType.TEXT
+            },
+            atTimelineMs = startMs,
+        )
+        if (created != null) {
+            selectedClipIds.value = setOf(created.clipId)
+            selectedTrackId.value = created.trackId
+            playheadMs.value = created.timelineStartMs
+            commitDocumentEdit(actionLabel, doc, updated)
+            viewModelScope.launch { _messages.emit("$actionLabel added at playhead") }
+        } else {
+            viewModelScope.launch { _messages.emit("Unlock a Text track to insert clip") }
+        }
+    }
+
+    fun updateSelectedTextTimedWords(
+        words: List<TimedTextWord>,
+        isEstimated: Boolean? = null,
+    ) {
+        if (!guardWritableOrEmit()) return
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind != ClipKind.TEXT) return
+        val updated = timelineEngine.updateClipTimedWords(
+            document = doc,
+            clipId = clip.clipId,
+            timedWords = words,
+            isTimingEstimated = isEstimated,
+        )
+        commitDocumentEdit("Edit Word Timing", doc, updated)
+    }
+
+    fun selectAsrModel(modelId: String) = captionLyricCoordinator.selectAsrModel(modelId)
+
+    fun downloadSelectedAsrModel(modelId: String = uiState.value.autoCaptionState.selectedModelId) =
+        captionLyricCoordinator.downloadModel(modelId)
+
+    fun cancelAsrModelDownload(modelId: String = uiState.value.autoCaptionState.selectedModelId) =
+        captionLyricCoordinator.cancelModelDownload(modelId)
+
+    fun deleteAsrModel(modelId: String = uiState.value.autoCaptionState.selectedModelId) =
+        captionLyricCoordinator.deleteModel(modelId)
+
+    fun selectCaptionSourceAsset(assetId: String?) =
+        captionLyricCoordinator.selectCaptionSourceAsset(assetId)
+
+    fun startAutoCaptionTranscription() {
+        val doc = uiState.value.project
+        val allClips = doc?.tracks?.flatMap { it.clips }.orEmpty()
+        captionLyricCoordinator.startTranscription(
+            assets = uiState.value.allAssets,
+            timelineClips = allClips,
+        )
+    }
+
+    fun cancelAutoCaptionTranscription() = captionLyricCoordinator.cancelTranscription()
+
+    fun updateCaptionMaxCharsPerLine(chars: Int) =
+        captionLyricCoordinator.updateCaptionMaxCharsPerLine(chars)
+
+    fun updateCaptionKaraokeMode(mode: KaraokeHighlightMode) =
+        captionLyricCoordinator.updateCaptionKaraokeMode(mode)
+
+    fun updateCaptionStylePreset(preset: TextStylePreset) =
+        captionLyricCoordinator.updateCaptionStylePreset(preset)
+
+    fun updateCaptionUseInvertEffect(enabled: Boolean) =
+        captionLyricCoordinator.updateCaptionUseInvertEffect(enabled)
+
+    fun updateCaptionCueText(cueId: String, newText: String) =
+        captionLyricCoordinator.updateCueText(cueId, newText)
+
+    fun deleteCaptionCue(cueId: String) = captionLyricCoordinator.deleteCue(cueId)
+
+    fun commitCaptionsToTimeline() {
+        if (!guardWritableOrEmit()) return
+        val doc = uiState.value.project ?: return
+        val requests = captionLyricCoordinator.buildCaptionClipRequests()
+        if (requests.isEmpty()) {
+            viewModelScope.launch { _messages.emit("No caption cues ready to insert") }
+            return
+        }
+        val explicitTrackId = selectedTrackId.value.takeIf { id ->
+            doc.tracks.firstOrNull { it.id == id }?.type == TrackType.TEXT
+        }
+        val (updated, inserted) = timelineEngine.insertTextClipsBatch(
+            document = doc,
+            requests = requests,
+            targetTrackId = explicitTrackId,
+        )
+        if (inserted.isEmpty()) {
+            viewModelScope.launch { _messages.emit("Unlock a Text track to insert generated captions") }
+            return
+        }
+        selectedClipIds.value = setOf(inserted.first().clipId)
+        selectedTrackId.value = inserted.first().trackId
+        commitDocumentEdit("Generate Auto Captions (${inserted.size})", doc, updated)
+        viewModelScope.launch { _messages.emit("Inserted ${inserted.size} editable caption clip(s)") }
+    }
+
+    fun selectLyricSourceAsset(assetId: String?) =
+        captionLyricCoordinator.selectLyricSourceAsset(assetId)
+
+    fun importLyricsText(rawText: String, replaceExisting: Boolean = true) =
+        captionLyricCoordinator.importLyricsText(rawText, replaceExisting)
+
+    fun importLyricsFromUri(uri: Uri) =
+        captionLyricCoordinator.importLyricsFromUri(uri)
+
+    fun loadSelectedClipIntoLyricStudio() {
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind != ClipKind.TEXT) return
+        captionLyricCoordinator.loadClipIntoLyricStudio(clip)
+        viewModelScope.launch { _messages.emit("Loaded clip into Lyric Studio for timing sync") }
+    }
+
+    fun selectLyricLine(lineId: String?) = captionLyricCoordinator.selectLyricLine(lineId)
+
+    fun selectLyricWord(lineId: String, wordId: String?) =
+        captionLyricCoordinator.selectLyricWord(lineId, wordId)
+
+    fun addEmptyLyricLine() = captionLyricCoordinator.addEmptyLyricLine()
+
+    fun editLyricLineText(lineId: String, newText: String) =
+        captionLyricCoordinator.editLyricLineText(lineId, newText)
+
+    fun splitSelectedLyricLine() = captionLyricCoordinator.splitSelectedWordLine()
+
+    fun mergeLyricLineWithNext(lineId: String) =
+        captionLyricCoordinator.mergeLineWithNext(lineId)
+
+    fun moveLyricLine(lineId: String, delta: Int) =
+        captionLyricCoordinator.moveLyricLine(lineId, delta)
+
+    fun deleteLyricLine(lineId: String) = captionLyricCoordinator.deleteLyricLine(lineId)
+
+    fun assignLyricLineStartAtPlayhead() {
+        val doc = uiState.value.project ?: return
+        val beats = resolveCurrentBeatTimestampsMs()
+        captionLyricCoordinator.assignLineStartAtPlayhead(playheadMs.value, doc.fps, beats)
+    }
+
+    fun assignLyricLineEndAtPlayhead() {
+        val doc = uiState.value.project ?: return
+        val beats = resolveCurrentBeatTimestampsMs()
+        captionLyricCoordinator.assignLineEndAtPlayhead(playheadMs.value, doc.fps, beats)
+    }
+
+    fun assignLyricWordStartAtPlayhead(lineId: String, wordId: String) {
+        val doc = uiState.value.project ?: return
+        val beats = resolveCurrentBeatTimestampsMs()
+        captionLyricCoordinator.assignWordStartAtPlayhead(lineId, wordId, playheadMs.value, doc.fps, beats)
+    }
+
+    fun assignLyricWordEndAtPlayhead(lineId: String, wordId: String) {
+        val doc = uiState.value.project ?: return
+        val beats = resolveCurrentBeatTimestampsMs()
+        captionLyricCoordinator.assignWordEndAtPlayhead(lineId, wordId, playheadMs.value, doc.fps, beats)
+    }
+
+    fun stepLyricWordSelection(delta: Int) = captionLyricCoordinator.stepWordSelection(delta)
+
+    fun adjustSelectedLyricWordDuration(deltaMs: Long) =
+        captionLyricCoordinator.adjustSelectedWordDuration(deltaMs)
+
+    fun distributeSelectedLineWordsAsEstimated() =
+        captionLyricCoordinator.distributeSelectedLineWordsAsEstimated(playheadMs.value)
+
+    fun shiftLyricsOffset(deltaMs: Long, applyToAll: Boolean) =
+        captionLyricCoordinator.shiftLyricsOffset(deltaMs, applyToAll)
+
+    fun resetLyricTiming(applyToAll: Boolean) =
+        captionLyricCoordinator.resetLyricTiming(applyToAll)
+
+    fun setLyricSnapToFrames(enabled: Boolean) = captionLyricCoordinator.setLyricSnapToFrames(enabled)
+
+    fun setLyricSnapToBeats(enabled: Boolean) = captionLyricCoordinator.setLyricSnapToBeats(enabled)
+
+    fun setLyricKaraokeMode(mode: KaraokeHighlightMode) =
+        captionLyricCoordinator.setLyricKaraokeMode(mode)
+
+    fun setLyricStylePreset(preset: TextStylePreset) =
+        captionLyricCoordinator.setLyricStylePreset(preset)
+
+    fun setLyricUseInvertEffect(enabled: Boolean) =
+        captionLyricCoordinator.setLyricUseInvertEffect(enabled)
+
+    fun commitLyricsToTimeline() {
+        if (!guardWritableOrEmit()) return
+        val doc = uiState.value.project ?: return
+        val requests = captionLyricCoordinator.buildLyricClipRequests(fallbackStartMs = playheadMs.value)
+        if (requests.isEmpty()) {
+            viewModelScope.launch { _messages.emit("Add or paste lyrics before committing to timeline") }
+            return
+        }
+        val explicitTrackId = selectedTrackId.value.takeIf { id ->
+            doc.tracks.firstOrNull { it.id == id }?.type == TrackType.TEXT
+        }
+        val (updated, inserted) = timelineEngine.insertTextClipsBatch(
+            document = doc,
+            requests = requests,
+            targetTrackId = explicitTrackId,
+        )
+        if (inserted.isEmpty()) {
+            viewModelScope.launch { _messages.emit("Unlock a Text track to insert lyrics") }
+            return
+        }
+        selectedClipIds.value = setOf(inserted.first().clipId)
+        selectedTrackId.value = inserted.first().trackId
+        commitDocumentEdit("Commit Lyrics (${inserted.size})", doc, updated)
+        viewModelScope.launch { _messages.emit("Committed ${inserted.size} lyric clip(s) to timeline") }
+    }
+
+    private fun resolveCurrentBeatTimestampsMs(): List<Long> {
+        val doc = uiState.value.project ?: return emptyList()
+        val markerBeats = doc.markers.filter { it.isBeatMarker }.map { it.timeMs }
+        val sourceId = uiState.value.lyricStudioState.selectedSourceAssetId
+            ?: uiState.value.selectedClipAsset?.id
+        val waveformBeats = sourceId?.let { id ->
+            val wf = uiState.value.waveformsByAssetId[id] ?: return@let emptyList()
+            val clipStart = doc.tracks.flatMap { it.clips }
+                .firstOrNull { it.assetId == id }
+                ?.timelineStartMs ?: 0L
+            wf.beatTimestampsMs.map { it + clipStart }
+        }.orEmpty()
+        return (markerBeats + waveformBeats).distinct().sorted()
+    }
+
     override fun onCleared() {
         playbackJob?.cancel()
         stopPcmAudition()
@@ -1701,6 +1982,9 @@ class ProjectWorkspaceViewModel(
             exportCoordinator: CutLabExportCoordinator? = null,
             proxyMediaManager: ProxyMediaManager? = null,
             appContext: Context? = null,
+            asrModelManager: AsrModelManager? = null,
+            speechRecognitionEngine: SpeechRecognitionEngine? = null,
+            lyricRecognitionProvider: LyricRecognitionProvider = DeferredExperimentalLyricProvider(),
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1715,6 +1999,9 @@ class ProjectWorkspaceViewModel(
                     exportCoordinator = exportCoordinator,
                     proxyMediaManager = proxyMediaManager,
                     appContext = appContext,
+                    asrModelManager = asrModelManager,
+                    speechRecognitionEngine = speechRecognitionEngine,
+                    lyricRecognitionProvider = lyricRecognitionProvider,
                 ) as T
             }
         }

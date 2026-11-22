@@ -89,6 +89,9 @@ import kotlin.math.roundToLong
 enum class QuickToolSheet {
     NONE,
     TEXT,
+    AUTO_CAPTION,
+    LYRIC_STUDIO,
+    INVERT_LYRIC,
     FILTERS,
     TRANSITIONS,
     SPEED,
@@ -110,8 +113,11 @@ fun QuickToolsOverviewContent(
     selectedClip: TimelineClipRef?,
     selectedAsset: MediaAsset?,
     onAddTextClip: (TextStylePreset) -> Unit,
+    onAddPresetTextClip: (TextOverlaySpec, String) -> Unit = { _, _ -> },
     onUpdateTextSpec: (TextOverlaySpec) -> Unit,
     onPreviewTextSpec: (TextOverlaySpec) -> Unit,
+    onOpenLyricStudioForClip: () -> Unit = {},
+    onOpenAutoCaption: () -> Unit = {},
     onUpdateAdjustments: (ClipAdjustments) -> Unit,
     onPreviewAdjustments: (ClipAdjustments) -> Unit,
     onApplyFilterToAll: () -> Unit,
@@ -129,9 +135,12 @@ fun QuickToolsOverviewContent(
         TextToolPanel(
             selectedClip = selectedClip,
             onAddTextClip = onAddTextClip,
+            onAddPresetTextClip = onAddPresetTextClip,
             onUpdateTextSpec = onUpdateTextSpec,
             onPreviewTextSpec = onPreviewTextSpec,
             onCommitSliderEdit = onCommitSliderEdit,
+            onOpenLyricStudioForClip = onOpenLyricStudioForClip,
+            onOpenAutoCaption = onOpenAutoCaption,
         )
 
         if (selectedClip != null &&
@@ -181,9 +190,12 @@ fun QuickToolsOverviewContent(
 fun TextToolPanel(
     selectedClip: TimelineClipRef?,
     onAddTextClip: (TextStylePreset) -> Unit,
+    onAddPresetTextClip: (TextOverlaySpec, String) -> Unit = { _, _ -> },
     onUpdateTextSpec: (TextOverlaySpec) -> Unit,
     onPreviewTextSpec: (TextOverlaySpec) -> Unit,
     onCommitSliderEdit: (String) -> Unit,
+    onOpenLyricStudioForClip: () -> Unit = {},
+    onOpenAutoCaption: () -> Unit = {},
 ) {
     val textClip = selectedClip?.takeIf { it.clipKind == ClipKind.TEXT }
     val spec = textClip?.textSpec
@@ -240,6 +252,19 @@ fun TextToolPanel(
                             if (spec != null) {
                                 val templated = EffectsEngine.defaultTextSpec(preset).copy(
                                     text = spec.text,
+                                    contentType = spec.contentType,
+                                    renderMode = spec.renderMode,
+                                    timedWords = spec.timedWords,
+                                    karaokeMode = spec.karaokeMode,
+                                    highlightColorArgb = spec.highlightColorArgb,
+                                    spokenColorArgb = spec.spokenColorArgb,
+                                    wordSpacingEm = spec.wordSpacingEm,
+                                    invertStrength = spec.invertStrength,
+                                    invertEdgeSoftness = spec.invertEdgeSoftness,
+                                    invertIncludeBackground = spec.invertIncludeBackground,
+                                    sourceLanguage = spec.sourceLanguage,
+                                    sourceAssetId = spec.sourceAssetId,
+                                    isTimingEstimated = spec.isTimingEstimated,
                                 )
                                 onUpdateTextSpec(templated)
                             } else {
@@ -385,6 +410,18 @@ fun TextToolPanel(
             }
         }
     }
+
+    Spacer(Modifier.height(10.dp))
+
+    InvertLyricAndKaraokeCard(
+        selectedClip = selectedClip,
+        onAddPresetTextClip = onAddPresetTextClip,
+        onUpdateTextSpec = onUpdateTextSpec,
+        onPreviewTextSpec = onPreviewTextSpec,
+        onCommitSliderEdit = onCommitSliderEdit,
+        onOpenLyricStudioForClip = onOpenLyricStudioForClip,
+        onOpenAutoCaption = onOpenAutoCaption,
+    )
 }
 
 @Composable

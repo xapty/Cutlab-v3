@@ -50,13 +50,16 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.InvertColors
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PermMedia
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
@@ -182,6 +185,14 @@ fun ProjectWorkspaceScreen(
         }
     }
 
+    val txtLyricPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importLyricsFromUri(uri)
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.messages.collect { message ->
             snackbarHostState.showSnackbar(message)
@@ -208,6 +219,9 @@ fun ProjectWorkspaceScreen(
     }
     val onImportCubeLut = {
         cubeLutPickerLauncher.launch(arrayOf("*/*"))
+    }
+    val onImportTxtLyrics = {
+        txtLyricPickerLauncher.launch(arrayOf("text/plain", "text/*"))
     }
 
     Scaffold(
@@ -460,6 +474,7 @@ fun ProjectWorkspaceScreen(
                                     .fillMaxHeight(),
                             )
                             SideInspectorPanel(
+                                viewModel = viewModel,
                                 uiState = uiState,
                                 project = project,
                                 onSelectTab = viewModel::setInspectorTab,
@@ -468,6 +483,7 @@ fun ProjectWorkspaceScreen(
                                 onImportImage = onImportImage,
                                 onImportAudio = onImportAudio,
                                 onImportFile = onImportFile,
+                                onImportTxtLyrics = onImportTxtLyrics,
                                 onInsertAsset = { assetId ->
                                     viewModel.insertAssetToTimeline(assetId, atPlayhead = false)
                                 },
@@ -485,6 +501,9 @@ fun ProjectWorkspaceScreen(
                                 onRemoveTrack = viewModel::removeTrack,
                                 onUpdateCanvas = viewModel::updateCanvasSpecs,
                                 onAddTextClip = { preset -> viewModel.addTextClip(preset, atPlayhead = true) },
+                                onAddPresetTextClip = { spec, label ->
+                                    viewModel.addCustomTextClip(spec, label, atPlayhead = true)
+                                },
                                 onUpdateTextSpec = viewModel::updateSelectedTextSpec,
                                 onPreviewTextSpec = viewModel::previewSelectedTextSpec,
                                 onUpdateAdjustments = viewModel::updateSelectedClipAdjustments,
@@ -769,9 +788,98 @@ fun ProjectWorkspaceScreen(
                     QuickToolSheet.TEXT -> TextToolPanel(
                         selectedClip = uiState.selectedClip,
                         onAddTextClip = { preset -> viewModel.addTextClip(preset, atPlayhead = true) },
+                        onAddPresetTextClip = { spec, label ->
+                            viewModel.addCustomTextClip(spec, label, atPlayhead = true)
+                        },
                         onUpdateTextSpec = viewModel::updateSelectedTextSpec,
                         onPreviewTextSpec = viewModel::previewSelectedTextSpec,
                         onCommitSliderEdit = viewModel::commitClipGesture,
+                        onOpenLyricStudioForClip = {
+                            viewModel.loadSelectedClipIntoLyricStudio()
+                            activeQuickTool = QuickToolSheet.LYRIC_STUDIO
+                        },
+                        onOpenAutoCaption = {
+                            activeQuickTool = QuickToolSheet.AUTO_CAPTION
+                        },
+                    )
+                    QuickToolSheet.AUTO_CAPTION -> CaptionToolPanel(
+                        captionState = uiState.autoCaptionState,
+                        assets = uiState.allAssets,
+                        fps = project.fps,
+                        onSelectSourceAsset = viewModel::selectCaptionSourceAsset,
+                        onSelectModel = viewModel::selectAsrModel,
+                        onDownloadModel = viewModel::downloadSelectedAsrModel,
+                        onCancelModelDownload = viewModel::cancelAsrModelDownload,
+                        onDeleteModel = viewModel::deleteAsrModel,
+                        onStartTranscription = viewModel::startAutoCaptionTranscription,
+                        onCancelTranscription = viewModel::cancelAutoCaptionTranscription,
+                        onUpdateMaxCharsPerLine = viewModel::updateCaptionMaxCharsPerLine,
+                        onUpdateKaraokeMode = viewModel::updateCaptionKaraokeMode,
+                        onUpdateStylePreset = viewModel::updateCaptionStylePreset,
+                        onUpdateUseInvertEffect = viewModel::updateCaptionUseInvertEffect,
+                        onUpdateCueText = viewModel::updateCaptionCueText,
+                        onDeleteCue = viewModel::deleteCaptionCue,
+                        onCommitCaptionsToTimeline = {
+                            viewModel.commitCaptionsToTimeline()
+                            activeQuickTool = QuickToolSheet.NONE
+                        },
+                    )
+                    QuickToolSheet.LYRIC_STUDIO -> LyricStudioPanel(
+                        lyricState = uiState.lyricStudioState,
+                        assets = uiState.allAssets,
+                        waveformsByAssetId = uiState.waveformsByAssetId,
+                        playheadMs = uiState.playheadMs,
+                        totalDurationMs = uiState.totalDurationMs,
+                        fps = project.fps,
+                        isPlaying = uiState.isPlaying,
+                        onTogglePlayPause = viewModel::togglePlayPause,
+                        onStepFrame = viewModel::stepFrame,
+                        onSeekTo = viewModel::seekTo,
+                        onSelectSourceAsset = viewModel::selectLyricSourceAsset,
+                        onImportLyricsText = { text -> viewModel.importLyricsText(text, replaceExisting = true) },
+                        onRequestImportTxtFile = onImportTxtLyrics,
+                        onAddEmptyLine = viewModel::addEmptyLyricLine,
+                        onSelectLine = viewModel::selectLyricLine,
+                        onSelectWord = viewModel::selectLyricWord,
+                        onEditLineText = viewModel::editLyricLineText,
+                        onSplitSelectedLine = viewModel::splitSelectedLyricLine,
+                        onMergeLineWithNext = viewModel::mergeLyricLineWithNext,
+                        onMoveLine = viewModel::moveLyricLine,
+                        onDeleteLine = viewModel::deleteLyricLine,
+                        onAssignLineStartAtPlayhead = viewModel::assignLyricLineStartAtPlayhead,
+                        onAssignLineEndAtPlayhead = viewModel::assignLyricLineEndAtPlayhead,
+                        onAssignWordStartAtPlayhead = viewModel::assignLyricWordStartAtPlayhead,
+                        onAssignWordEndAtPlayhead = viewModel::assignLyricWordEndAtPlayhead,
+                        onStepWordSelection = viewModel::stepLyricWordSelection,
+                        onAdjustWordDuration = viewModel::adjustSelectedLyricWordDuration,
+                        onEstimateWordTimings = viewModel::distributeSelectedLineWordsAsEstimated,
+                        onShiftLyricsOffset = viewModel::shiftLyricsOffset,
+                        onResetLyricTiming = viewModel::resetLyricTiming,
+                        onSetSnapToFrames = viewModel::setLyricSnapToFrames,
+                        onSetSnapToBeats = viewModel::setLyricSnapToBeats,
+                        onSetKaraokeMode = viewModel::setLyricKaraokeMode,
+                        onSetStylePreset = viewModel::setLyricStylePreset,
+                        onSetUseInvertEffect = viewModel::setLyricUseInvertEffect,
+                        onCommitLyricsToTimeline = {
+                            viewModel.commitLyricsToTimeline()
+                            activeQuickTool = QuickToolSheet.NONE
+                        },
+                    )
+                    QuickToolSheet.INVERT_LYRIC -> InvertLyricAndKaraokeCard(
+                        selectedClip = uiState.selectedClip,
+                        onAddPresetTextClip = { spec, label ->
+                            viewModel.addCustomTextClip(spec, label, atPlayhead = true)
+                        },
+                        onUpdateTextSpec = viewModel::updateSelectedTextSpec,
+                        onPreviewTextSpec = viewModel::previewSelectedTextSpec,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                        onOpenLyricStudioForClip = {
+                            viewModel.loadSelectedClipIntoLyricStudio()
+                            activeQuickTool = QuickToolSheet.LYRIC_STUDIO
+                        },
+                        onOpenAutoCaption = {
+                            activeQuickTool = QuickToolSheet.AUTO_CAPTION
+                        },
                     )
                     QuickToolSheet.FILTERS -> FilterToolPanel(
                         clip = uiState.selectedClip,
@@ -1082,6 +1190,7 @@ fun ProjectWorkspaceScreen(
 
 @Composable
 private fun SideInspectorPanel(
+    viewModel: ProjectWorkspaceViewModel,
     uiState: ProjectWorkspaceUiState,
     project: ProjectDocument,
     onSelectTab: (InspectorTab) -> Unit,
@@ -1090,6 +1199,7 @@ private fun SideInspectorPanel(
     onImportImage: () -> Unit,
     onImportAudio: () -> Unit,
     onImportFile: () -> Unit,
+    onImportTxtLyrics: () -> Unit,
     onInsertAsset: (String) -> Unit,
     onDeleteAsset: (String) -> Unit,
     onSplitAtPlayhead: () -> Unit,
@@ -1105,6 +1215,7 @@ private fun SideInspectorPanel(
     onRemoveTrack: (String) -> Unit,
     onUpdateCanvas: (AspectRatioPreset, Int) -> Unit,
     onAddTextClip: (TextStylePreset) -> Unit,
+    onAddPresetTextClip: (TextOverlaySpec, String) -> Unit,
     onUpdateTextSpec: (TextOverlaySpec) -> Unit,
     onPreviewTextSpec: (TextOverlaySpec) -> Unit,
     onUpdateAdjustments: (ClipAdjustments) -> Unit,
@@ -1277,8 +1388,14 @@ private fun SideInspectorPanel(
                             selectedClip = uiState.selectedClip,
                             selectedAsset = uiState.selectedClipAsset,
                             onAddTextClip = onAddTextClip,
+                            onAddPresetTextClip = onAddPresetTextClip,
                             onUpdateTextSpec = onUpdateTextSpec,
                             onPreviewTextSpec = onPreviewTextSpec,
+                            onOpenLyricStudioForClip = {
+                                viewModel.loadSelectedClipIntoLyricStudio()
+                                onSelectTab(InspectorTab.LYRICS)
+                            },
+                            onOpenAutoCaption = { onSelectTab(InspectorTab.CAPTIONS) },
                             onUpdateAdjustments = onUpdateAdjustments,
                             onPreviewAdjustments = onPreviewAdjustments,
                             onApplyFilterToAll = onApplyFilterToAll,
@@ -1291,6 +1408,85 @@ private fun SideInspectorPanel(
                             onPreviewAudio = onPreviewAudio,
                             onCommitSliderEdit = onCommitSliderEdit,
                             onUpdateCanvas = onUpdateCanvas,
+                        )
+                    }
+                }
+
+                InspectorTab.CAPTIONS -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CaptionToolPanel(
+                            captionState = uiState.autoCaptionState,
+                            assets = uiState.allAssets,
+                            fps = project.fps,
+                            onSelectSourceAsset = viewModel::selectCaptionSourceAsset,
+                            onSelectModel = viewModel::selectAsrModel,
+                            onDownloadModel = viewModel::downloadSelectedAsrModel,
+                            onCancelModelDownload = viewModel::cancelAsrModelDownload,
+                            onDeleteModel = viewModel::deleteAsrModel,
+                            onStartTranscription = viewModel::startAutoCaptionTranscription,
+                            onCancelTranscription = viewModel::cancelAutoCaptionTranscription,
+                            onUpdateMaxCharsPerLine = viewModel::updateCaptionMaxCharsPerLine,
+                            onUpdateKaraokeMode = viewModel::updateCaptionKaraokeMode,
+                            onUpdateStylePreset = viewModel::updateCaptionStylePreset,
+                            onUpdateUseInvertEffect = viewModel::updateCaptionUseInvertEffect,
+                            onUpdateCueText = viewModel::updateCaptionCueText,
+                            onDeleteCue = viewModel::deleteCaptionCue,
+                            onCommitCaptionsToTimeline = viewModel::commitCaptionsToTimeline,
+                        )
+                    }
+                }
+
+                InspectorTab.LYRICS -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        LyricStudioPanel(
+                            lyricState = uiState.lyricStudioState,
+                            assets = uiState.allAssets,
+                            waveformsByAssetId = uiState.waveformsByAssetId,
+                            playheadMs = uiState.playheadMs,
+                            totalDurationMs = uiState.totalDurationMs,
+                            fps = project.fps,
+                            isPlaying = uiState.isPlaying,
+                            onTogglePlayPause = viewModel::togglePlayPause,
+                            onStepFrame = viewModel::stepFrame,
+                            onSeekTo = viewModel::seekTo,
+                            onSelectSourceAsset = viewModel::selectLyricSourceAsset,
+                            onImportLyricsText = { text -> viewModel.importLyricsText(text, replaceExisting = true) },
+                            onRequestImportTxtFile = onImportTxtLyrics,
+                            onAddEmptyLine = viewModel::addEmptyLyricLine,
+                            onSelectLine = viewModel::selectLyricLine,
+                            onSelectWord = viewModel::selectLyricWord,
+                            onEditLineText = viewModel::editLyricLineText,
+                            onSplitSelectedLine = viewModel::splitSelectedLyricLine,
+                            onMergeLineWithNext = viewModel::mergeLyricLineWithNext,
+                            onMoveLine = viewModel::moveLyricLine,
+                            onDeleteLine = viewModel::deleteLyricLine,
+                            onAssignLineStartAtPlayhead = viewModel::assignLyricLineStartAtPlayhead,
+                            onAssignLineEndAtPlayhead = viewModel::assignLyricLineEndAtPlayhead,
+                            onAssignWordStartAtPlayhead = viewModel::assignLyricWordStartAtPlayhead,
+                            onAssignWordEndAtPlayhead = viewModel::assignLyricWordEndAtPlayhead,
+                            onStepWordSelection = viewModel::stepLyricWordSelection,
+                            onAdjustWordDuration = viewModel::adjustSelectedLyricWordDuration,
+                            onEstimateWordTimings = viewModel::distributeSelectedLineWordsAsEstimated,
+                            onShiftLyricsOffset = viewModel::shiftLyricsOffset,
+                            onResetLyricTiming = viewModel::resetLyricTiming,
+                            onSetSnapToFrames = viewModel::setLyricSnapToFrames,
+                            onSetSnapToBeats = viewModel::setLyricSnapToBeats,
+                            onSetKaraokeMode = viewModel::setLyricKaraokeMode,
+                            onSetStylePreset = viewModel::setLyricStylePreset,
+                            onSetUseInvertEffect = viewModel::setLyricUseInvertEffect,
+                            onCommitLyricsToTimeline = viewModel::commitLyricsToTimeline,
                         )
                     }
                 }
@@ -1333,6 +1529,14 @@ private fun SideInspectorPanel(
                             onGenerateProxy = onGenerateProxy,
                             onCancelProxy = onCancelProxy,
                             onDeleteProxy = onDeleteProxy,
+                            onAddPresetTextClip = onAddPresetTextClip,
+                            onUpdateTextSpec = onUpdateTextSpec,
+                            onPreviewTextSpec = onPreviewTextSpec,
+                            onOpenLyricStudioForClip = {
+                                viewModel.loadSelectedClipIntoLyricStudio()
+                                onSelectTab(InspectorTab.LYRICS)
+                            },
+                            onOpenAutoCaption = { onSelectTab(InspectorTab.CAPTIONS) },
                             onCommitSliderEdit = onCommitSliderEdit,
                         )
                     }
@@ -1538,6 +1742,39 @@ private fun PortraitBottomToolbar(
                 Icon(Icons.Default.TextFields, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Text")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.AUTO_CAPTION) },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_captions_button"),
+            ) {
+                Icon(Icons.Default.Subtitles, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Captions")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.LYRIC_STUDIO) },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_lyrics_button"),
+            ) {
+                Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Lyrics")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.INVERT_LYRIC) },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_invert_lyric_button"),
+            ) {
+                Icon(Icons.Default.InvertColors, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Invert")
             }
 
             OutlinedButton(

@@ -82,6 +82,11 @@ fun CompositorOverviewContent(
     onGenerateProxy: () -> Unit = {},
     onCancelProxy: () -> Unit = {},
     onDeleteProxy: () -> Unit = {},
+    onAddPresetTextClip: (com.example.engine.project.TextOverlaySpec, String) -> Unit = { _, _ -> },
+    onUpdateTextSpec: (com.example.engine.project.TextOverlaySpec) -> Unit = {},
+    onPreviewTextSpec: (com.example.engine.project.TextOverlaySpec) -> Unit = {},
+    onOpenLyricStudioForClip: () -> Unit = {},
+    onOpenAutoCaption: () -> Unit = {},
     onCommitSliderEdit: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -113,6 +118,17 @@ fun CompositorOverviewContent(
                 onCommitSliderEdit = onCommitSliderEdit,
             )
         } else if (selectedClip != null && selectedAsset?.type != MediaType.AUDIO) {
+            if (selectedClip.clipKind == ClipKind.TEXT) {
+                InvertLyricAndKaraokeCard(
+                    selectedClip = selectedClip,
+                    onAddPresetTextClip = onAddPresetTextClip,
+                    onUpdateTextSpec = onUpdateTextSpec,
+                    onPreviewTextSpec = onPreviewTextSpec,
+                    onCommitSliderEdit = onCommitSliderEdit,
+                    onOpenLyricStudioForClip = onOpenLyricStudioForClip,
+                    onOpenAutoCaption = onOpenAutoCaption,
+                )
+            }
             TransformToolPanel(
                 clip = selectedClip,
                 onUpdateTransform = onUpdateTransform,
