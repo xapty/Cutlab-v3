@@ -70,6 +70,7 @@ import com.example.engine.project.ClipKind
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EasingPreset
 import com.example.engine.project.FilterPreset
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectDocument
@@ -128,6 +129,8 @@ fun QuickToolsOverviewContent(
     onToggleReverse: () -> Unit = {},
     onUpdateAudio: (Float, Boolean, Long, Long) -> Unit,
     onPreviewAudio: (Float, Boolean, Long, Long) -> Unit,
+    onUpdateTransform: (LayerTransform) -> Unit = {},
+    onPreviewTransform: (LayerTransform) -> Unit = {},
     onCommitSliderEdit: (String) -> Unit,
     onUpdateCanvas: (AspectRatioPreset, Int) -> Unit,
 ) {
@@ -138,6 +141,8 @@ fun QuickToolsOverviewContent(
             onAddPresetTextClip = onAddPresetTextClip,
             onUpdateTextSpec = onUpdateTextSpec,
             onPreviewTextSpec = onPreviewTextSpec,
+            onUpdateTransform = onUpdateTransform,
+            onPreviewTransform = onPreviewTransform,
             onCommitSliderEdit = onCommitSliderEdit,
             onOpenLyricStudioForClip = onOpenLyricStudioForClip,
             onOpenAutoCaption = onOpenAutoCaption,
@@ -193,6 +198,8 @@ fun TextToolPanel(
     onAddPresetTextClip: (TextOverlaySpec, String) -> Unit = { _, _ -> },
     onUpdateTextSpec: (TextOverlaySpec) -> Unit,
     onPreviewTextSpec: (TextOverlaySpec) -> Unit,
+    onUpdateTransform: (LayerTransform) -> Unit = {},
+    onPreviewTransform: (LayerTransform) -> Unit = {},
     onCommitSliderEdit: (String) -> Unit,
     onOpenLyricStudioForClip: () -> Unit = {},
     onOpenAutoCaption: () -> Unit = {},
@@ -252,6 +259,8 @@ fun TextToolPanel(
                             if (spec != null) {
                                 val templated = EffectsEngine.defaultTextSpec(preset).copy(
                                     text = spec.text,
+                                    offsetX = spec.offsetX,
+                                    offsetY = spec.offsetY,
                                     contentType = spec.contentType,
                                     renderMode = spec.renderMode,
                                     timedWords = spec.timedWords,
@@ -380,15 +389,6 @@ fun TextToolPanel(
                     onValueChangeFinished = { onCommitSliderEdit("Resize Text") },
                 )
 
-                LabeledStudioSlider(
-                    label = "Vertical Position",
-                    valueText = "${(spec.offsetY * 100).toInt()}%",
-                    value = spec.offsetY,
-                    valueRange = -0.40f..0.40f,
-                    onValueChange = { onPreviewTextSpec(spec.copy(offsetY = it)) },
-                    onValueChangeFinished = { onCommitSliderEdit("Position Text") },
-                )
-
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -409,6 +409,16 @@ fun TextToolPanel(
                 )
             }
         }
+    }
+
+    if (textClip != null) {
+        Spacer(Modifier.height(10.dp))
+        UniversalTextTransformSection(
+            clip = textClip,
+            onUpdateTransform = onUpdateTransform,
+            onPreviewTransform = onPreviewTransform,
+            onCommitSliderEdit = onCommitSliderEdit,
+        )
     }
 
     Spacer(Modifier.height(10.dp))

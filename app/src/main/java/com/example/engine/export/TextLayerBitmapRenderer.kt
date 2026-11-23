@@ -178,8 +178,8 @@ class TextLayerBitmapRenderer(
             synchronized(this) { bitmapCache[cacheKey] = generated }
         } ?: return null
 
-        val posX = (spec.offsetX + transform.positionX).coerceIn(-0.95f, 0.95f)
-        val posY = (spec.offsetY + transform.positionY).coerceIn(-0.95f, 0.95f)
+        val posX = UnifiedTextEngine.effectivePositionX(spec, transform)
+        val posY = UnifiedTextEngine.effectivePositionY(spec, transform)
 
         return RenderedTextBitmapFrame(
             bitmap = bitmap,

@@ -13,8 +13,8 @@ import com.example.core.storage.MediaStorageManager
 import com.example.engine.asr.AsrModelManager
 import com.example.engine.asr.DeferredExperimentalLyricProvider
 import com.example.engine.asr.LyricRecognitionProvider
+import com.example.engine.asr.SherpaWhisperSpeechRecognitionEngine
 import com.example.engine.asr.SpeechRecognitionEngine
-import com.example.engine.asr.VoskSpeechRecognitionEngine
 import com.example.engine.audio.MixedAudioPreviewPlayer
 import com.example.engine.audio.MultiTrackAudioMixer
 import com.example.engine.audio.PcmAudioExtractor
@@ -59,7 +59,7 @@ class AppContainer(context: Context) {
     val pcmAudioExtractor: PcmAudioExtractor by lazy { PcmAudioExtractor(appContext) }
     val mixedAudioPreviewPlayer: MixedAudioPreviewPlayer by lazy { MixedAudioPreviewPlayer() }
     val asrModelManager: AsrModelManager by lazy { AsrModelManager(appContext) }
-    val speechRecognitionEngine: SpeechRecognitionEngine by lazy { VoskSpeechRecognitionEngine() }
+    val speechRecognitionEngine: SpeechRecognitionEngine by lazy { SherpaWhisperSpeechRecognitionEngine() }
     val lyricRecognitionProvider: LyricRecognitionProvider by lazy {
         DeferredExperimentalLyricProvider()
     }

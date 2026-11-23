@@ -46,6 +46,7 @@ import com.example.core.designsystem.StudioPanel
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.ClipKind
 import com.example.engine.project.KaraokeHighlightMode
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.TextContentType
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextRenderMode
@@ -69,6 +70,9 @@ fun InvertLyricAndKaraokeCard(
     onCommitSliderEdit: (String) -> Unit,
     onOpenLyricStudioForClip: () -> Unit = {},
     onOpenAutoCaption: () -> Unit = {},
+    showTransformControls: Boolean = false,
+    onUpdateTransform: (LayerTransform) -> Unit = {},
+    onPreviewTransform: (LayerTransform) -> Unit = {},
 ) {
     val studio = LocalStudioColors.current
     val textClip = selectedClip?.takeIf { it.clipKind == ClipKind.TEXT }
@@ -412,6 +416,16 @@ fun InvertLyricAndKaraokeCard(
                 }
             }
         }
+    }
+
+    if (showTransformControls && textClip != null) {
+        Spacer(Modifier.height(10.dp))
+        UniversalTextTransformSection(
+            clip = textClip,
+            onUpdateTransform = onUpdateTransform,
+            onPreviewTransform = onPreviewTransform,
+            onCommitSliderEdit = onCommitSliderEdit,
+        )
     }
 }
 

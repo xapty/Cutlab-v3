@@ -465,6 +465,11 @@ fun ProjectWorkspaceScreen(
                                 isPlaying = uiState.isPlaying,
                                 preferProxyPlayback = uiState.preferProxyPlayback,
                                 stageHeight = 148.dp,
+                                selectedClipId = uiState.selectedClip?.clipId,
+                                onSelectClip = viewModel::selectClip,
+                                onBeginTransformGesture = viewModel::beginClipGesture,
+                                onPreviewClipTransform = viewModel::previewTransformForClip,
+                                onCommitTransformGesture = viewModel::commitClipGesture,
                                 onTogglePlayPause = viewModel::togglePlayPause,
                                 onStepFrame = viewModel::stepFrame,
                                 onJumpStart = viewModel::jumpToStart,
@@ -608,6 +613,11 @@ fun ProjectWorkspaceScreen(
                             isPlaying = uiState.isPlaying,
                             preferProxyPlayback = uiState.preferProxyPlayback,
                             stageHeight = 186.dp,
+                            selectedClipId = uiState.selectedClip?.clipId,
+                            onSelectClip = viewModel::selectClip,
+                            onBeginTransformGesture = viewModel::beginClipGesture,
+                            onPreviewClipTransform = viewModel::previewTransformForClip,
+                            onCommitTransformGesture = viewModel::commitClipGesture,
                             onTogglePlayPause = viewModel::togglePlayPause,
                             onStepFrame = viewModel::stepFrame,
                             onJumpStart = viewModel::jumpToStart,
@@ -793,6 +803,8 @@ fun ProjectWorkspaceScreen(
                         },
                         onUpdateTextSpec = viewModel::updateSelectedTextSpec,
                         onPreviewTextSpec = viewModel::previewSelectedTextSpec,
+                        onUpdateTransform = viewModel::updateSelectedClipTransform,
+                        onPreviewTransform = viewModel::previewSelectedClipTransform,
                         onCommitSliderEdit = viewModel::commitClipGesture,
                         onOpenLyricStudioForClip = {
                             viewModel.loadSelectedClipIntoLyricStudio()
@@ -808,6 +820,7 @@ fun ProjectWorkspaceScreen(
                         fps = project.fps,
                         onSelectSourceAsset = viewModel::selectCaptionSourceAsset,
                         onSelectModel = viewModel::selectAsrModel,
+                        onSelectLanguage = viewModel::selectCaptionLanguage,
                         onDownloadModel = viewModel::downloadSelectedAsrModel,
                         onCancelModelDownload = viewModel::cancelAsrModelDownload,
                         onDeleteModel = viewModel::deleteAsrModel,
@@ -880,6 +893,9 @@ fun ProjectWorkspaceScreen(
                         onOpenAutoCaption = {
                             activeQuickTool = QuickToolSheet.AUTO_CAPTION
                         },
+                        showTransformControls = true,
+                        onUpdateTransform = viewModel::updateSelectedClipTransform,
+                        onPreviewTransform = viewModel::previewSelectedClipTransform,
                     )
                     QuickToolSheet.FILTERS -> FilterToolPanel(
                         clip = uiState.selectedClip,
@@ -1406,6 +1422,8 @@ private fun SideInspectorPanel(
                             onToggleReverse = onToggleReverse,
                             onUpdateAudio = onUpdateAudio,
                             onPreviewAudio = onPreviewAudio,
+                            onUpdateTransform = onUpdateTransform,
+                            onPreviewTransform = onPreviewTransform,
                             onCommitSliderEdit = onCommitSliderEdit,
                             onUpdateCanvas = onUpdateCanvas,
                         )
@@ -1426,6 +1444,7 @@ private fun SideInspectorPanel(
                             fps = project.fps,
                             onSelectSourceAsset = viewModel::selectCaptionSourceAsset,
                             onSelectModel = viewModel::selectAsrModel,
+                            onSelectLanguage = viewModel::selectCaptionLanguage,
                             onDownloadModel = viewModel::downloadSelectedAsrModel,
                             onCancelModelDownload = viewModel::cancelAsrModelDownload,
                             onDeleteModel = viewModel::deleteAsrModel,

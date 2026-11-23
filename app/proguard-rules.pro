@@ -45,3 +45,8 @@
 -keepclassmembers class com.example.core.graphics.GlCompositorRenderer {
     public *;
 }
+
+# sherpa-onnx JNI / Whisper OfflineRecognizer bindings
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-dontwarn com.k2fsa.sherpa.onnx.**
+-dontwarn org.apache.commons.compress.**

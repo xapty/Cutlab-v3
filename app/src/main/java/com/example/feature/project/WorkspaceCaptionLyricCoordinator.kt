@@ -2,6 +2,7 @@ package com.example.feature.project
 
 import android.content.Context
 import android.net.Uri
+import com.example.engine.asr.AsrLanguageOption
 import com.example.engine.asr.AsrModelAvailability
 import com.example.engine.asr.AsrModelCatalog
 import com.example.engine.asr.AsrModelManager
@@ -42,6 +43,7 @@ import kotlinx.coroutines.withContext
 
 sealed interface AutoCaptionJobState {
     data object Idle : AutoCaptionJobState
+    data class LoadingModel(val modelName: String) : AutoCaptionJobState
     data class Running(val progress: Float, val statusMessage: String) : AutoCaptionJobState
     data class Completed(val cueCount: Int, val engineName: String) : AutoCaptionJobState
     data class Error(val message: String) : AutoCaptionJobState
@@ -52,6 +54,7 @@ data class AutoCaptionUiState(
     val models: List<AsrModelSpec> = AsrModelCatalog.MODELS,
     val modelStatuses: Map<String, AsrModelAvailability> = emptyMap(),
     val selectedModelId: String = AsrModelCatalog.defaultModel().id,
+    val selectedLanguageCode: String = AsrLanguageOption.AUTO.code,
     val selectedSourceAssetId: String? = null,
     val jobState: AutoCaptionJobState = AutoCaptionJobState.Idle,
     val cues: List<EditableCaptionCue> = emptyList(),
@@ -62,6 +65,9 @@ data class AutoCaptionUiState(
 ) {
     val selectedModel: AsrModelSpec
         get() = AsrModelCatalog.findById(selectedModelId) ?: AsrModelCatalog.defaultModel()
+
+    val selectedLanguage: AsrLanguageOption
+        get() = AsrLanguageOption.fromCode(selectedLanguageCode)
 
     val selectedModelAvailability: AsrModelAvailability
         get() = modelStatuses[selectedModel.id] ?: AsrModelAvailability.NotInstalled
@@ -92,6 +98,7 @@ private data class CaptionSettingsBundle(
     val karaokeMode: KaraokeHighlightMode,
     val stylePreset: TextStylePreset,
     val useInvertEffect: Boolean,
+    val selectedLanguageCode: String,
 )
 
 private data class LyricLinesBundle(
@@ -120,6 +127,7 @@ class WorkspaceCaptionLyricCoordinator(
 ) {
     private val modelStatuses = MutableStateFlow<Map<String, AsrModelAvailability>>(emptyMap())
     private val selectedModelId = MutableStateFlow(AsrModelCatalog.defaultModel().id)
+    private val selectedLanguageCode = MutableStateFlow(AsrLanguageOption.AUTO.code)
     private val selectedCaptionAssetId = MutableStateFlow<String?>(null)
     private val captionJobState = MutableStateFlow<AutoCaptionJobState>(AutoCaptionJobState.Idle)
     private val editableCues = MutableStateFlow<List<EditableCaptionCue>>(emptyList())
@@ -147,7 +155,7 @@ class WorkspaceCaptionLyricCoordinator(
         refreshModelStatuses()
     }
 
-    private val captionSettings = combine(
+    private val captionStyleBundle = combine(
         editableCues,
         captionMaxCharsPerLine,
         captionKaraokeMode,
@@ -160,7 +168,15 @@ class WorkspaceCaptionLyricCoordinator(
             karaokeMode = karaoke,
             stylePreset = preset,
             useInvertEffect = invert,
+            selectedLanguageCode = selectedLanguageCode.value,
         )
+    }
+
+    private val captionSettings = combine(
+        captionStyleBundle,
+        selectedLanguageCode,
+    ) { bundle, langCode ->
+        bundle.copy(selectedLanguageCode = langCode)
     }
 
     val autoCaptionState: StateFlow<AutoCaptionUiState> = combine(
@@ -174,6 +190,7 @@ class WorkspaceCaptionLyricCoordinator(
             models = AsrModelCatalog.MODELS,
             modelStatuses = statuses,
             selectedModelId = modelId,
+            selectedLanguageCode = settings.selectedLanguageCode,
             selectedSourceAssetId = sourceId,
             jobState = job,
             cues = settings.cues,
@@ -254,6 +271,10 @@ class WorkspaceCaptionLyricCoordinator(
         if (AsrModelCatalog.findById(modelId) != null) {
             selectedModelId.value = modelId
         }
+    }
+
+    fun selectCaptionLanguage(languageCode: String) {
+        selectedLanguageCode.value = AsrLanguageOption.fromCode(languageCode).code
     }
 
     fun selectCaptionSourceAsset(assetId: String?) {
@@ -349,7 +370,7 @@ class WorkspaceCaptionLyricCoordinator(
         }
         if (!engine.isRuntimeSupported()) {
             captionJobState.value = AutoCaptionJobState.Error(
-                "Vosk native ASR library is unavailable on this ABI/runtime.",
+                "sherpa-onnx Whisper native ASR library is unavailable on this ABI/runtime.",
             )
             return
         }
@@ -358,20 +379,26 @@ class WorkspaceCaptionLyricCoordinator(
             .filter { it.assetId == resolvedAsset.id }
             .minByOrNull { it.timelineStartMs }
             ?.timelineStartMs ?: 0L
+        val languageOption = AsrLanguageOption.fromCode(selectedLanguageCode.value)
 
         transcriptionJob?.cancel()
         transcriptionJob = scope.launch {
-            captionJobState.value = AutoCaptionJobState.Running(0.02f, "Extracting 16 kHz mono audio...")
+            captionJobState.value = AutoCaptionJobState.LoadingModel(model.displayName)
             try {
                 val res = engine.transcribeAudio(
                     assetId = resolvedAsset.id,
                     modelSpec = model,
                     modelDirectory = manager.getModelDirectory(model),
+                    languageOption = languageOption,
                     streamMono16kPcm = { onChunk ->
                         extractor.streamMonoPcm16kChunks(resolvedAsset, onChunk = onChunk)
                     },
                     onProgress = { progress, status ->
-                        captionJobState.value = AutoCaptionJobState.Running(progress, status)
+                        captionJobState.value = if (status.startsWith("Loading", ignoreCase = true)) {
+                            AutoCaptionJobState.LoadingModel(model.displayName)
+                        } else {
+                            AutoCaptionJobState.Running(progress, status)
+                        }
                     },
                 )
                 res.onSuccess { transcript ->
@@ -500,11 +527,13 @@ class WorkspaceCaptionLyricCoordinator(
                 karaokeMode = captionKaraokeMode.value,
             )
         }
-        val selectedModel = AsrModelCatalog.findById(selectedModelId.value)
+        val resolvedLanguage = lastTranscriptResult?.detectedLanguageCode
+            ?: lastTranscriptResult?.languageCode
+            ?: selectedLanguageCode.value
         return AutoCaptionSegmentation.buildClipRequests(
             cues = cues,
             styleTemplate = template,
-            sourceLanguage = selectedModel?.languageCode,
+            sourceLanguage = resolvedLanguage,
             sourceAssetId = selectedCaptionAssetId.value,
             karaokeMode = captionKaraokeMode.value,
         )

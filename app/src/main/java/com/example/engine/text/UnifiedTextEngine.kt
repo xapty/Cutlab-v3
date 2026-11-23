@@ -1,8 +1,10 @@
 package com.example.engine.text
 
 import com.example.engine.project.KaraokeHighlightMode
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TimedTextWord
+import com.example.engine.project.TimelineClipRef
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.min
@@ -42,6 +44,102 @@ data class KaraokeEvaluation(
 object UnifiedTextEngine {
 
     const val MIN_WORD_DURATION_MS = 40L
+    const val MIN_TEXT_POSITION_NORM = -1.5f
+    const val MAX_TEXT_POSITION_NORM = 1.5f
+    const val MIN_TEXT_SCALE = 0.1f
+    const val MAX_TEXT_SCALE = 4.0f
+    const val MIN_ROTATION_DEG = -360f
+    const val MAX_ROTATION_DEG = 360f
+
+    fun effectivePositionX(
+        spec: TextOverlaySpec?,
+        transform: LayerTransform,
+    ): Float = ((spec?.offsetX ?: 0f) + transform.positionX)
+        .coerceIn(MIN_TEXT_POSITION_NORM, MAX_TEXT_POSITION_NORM)
+
+    fun effectivePositionY(
+        spec: TextOverlaySpec?,
+        transform: LayerTransform,
+    ): Float = ((spec?.offsetY ?: 0f) + transform.positionY)
+        .coerceIn(MIN_TEXT_POSITION_NORM, MAX_TEXT_POSITION_NORM)
+
+    fun clampTransform(transform: LayerTransform): LayerTransform = transform.copy(
+        positionX = transform.positionX.coerceIn(MIN_TEXT_POSITION_NORM, MAX_TEXT_POSITION_NORM),
+        positionY = transform.positionY.coerceIn(MIN_TEXT_POSITION_NORM, MAX_TEXT_POSITION_NORM),
+        scaleX = transform.scaleX.coerceIn(MIN_TEXT_SCALE, MAX_TEXT_SCALE),
+        scaleY = transform.scaleY.coerceIn(MIN_TEXT_SCALE, MAX_TEXT_SCALE),
+        rotationDeg = transform.rotationDeg.coerceIn(MIN_ROTATION_DEG, MAX_ROTATION_DEG),
+        opacity = transform.opacity.coerceIn(0f, 1f),
+        anchorX = transform.anchorX.coerceIn(0f, 1f),
+        anchorY = transform.anchorY.coerceIn(0f, 1f),
+    )
+
+    fun effectiveTransform(
+        spec: TextOverlaySpec?,
+        transform: LayerTransform,
+    ): LayerTransform = clampTransform(
+        transform.copy(
+            positionX = effectivePositionX(spec, transform),
+            positionY = effectivePositionY(spec, transform),
+        ),
+    )
+
+    fun normalizeClipTransformForEdit(
+        clip: TimelineClipRef,
+        nextEffectiveTransform: LayerTransform,
+    ): TimelineClipRef {
+        val clamped = clampTransform(nextEffectiveTransform)
+        val clearedSpec = clip.textSpec?.copy(offsetX = 0f, offsetY = 0f)
+        return clip.copy(
+            transform = clamped,
+            textSpec = clearedSpec,
+        )
+    }
+
+    fun centerHorizontally(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = effectiveTransform(clip.textSpec, clip.transform).copy(positionX = 0f),
+        )
+
+    fun centerVertically(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = effectiveTransform(clip.textSpec, clip.transform).copy(positionY = 0f),
+        )
+
+    fun resetPosition(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = effectiveTransform(clip.textSpec, clip.transform).copy(
+                positionX = 0f,
+                positionY = 0f,
+            ),
+        )
+
+    fun resetScale(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = effectiveTransform(clip.textSpec, clip.transform).copy(
+                scaleX = 1f,
+                scaleY = 1f,
+                uniformScale = true,
+            ),
+        )
+
+    fun resetRotation(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = effectiveTransform(clip.textSpec, clip.transform).copy(
+                rotationDeg = 0f,
+            ),
+        )
+
+    fun resetAllTransform(clip: TimelineClipRef): TimelineClipRef =
+        normalizeClipTransformForEdit(
+            clip = clip,
+            nextEffectiveTransform = LayerTransform(),
+        )
 
     /**
      * Normalizes clip-local word timestamps:

@@ -12,7 +12,7 @@ data class LyricAlignmentAvailability(
 /**
  * Provider boundary for future experimental singing-lyric transcription or forced alignment.
  *
- * Per CUTLAB Task 003 §8: ordinary speech ASR (Vosk) is NOT a reliable singing-voice lyric
+ * Per CUTLAB Task 003 §8 & 003.1: ordinary speech ASR (Whisper) is NOT a reliable singing-voice lyric
  * transcriber because vocals are mixed with polyphonic instruments, reverb, pitch modulation,
  * and harmonies. Manual Lyric Editor & Synchronization remains 100% independent of this provider.
  */

@@ -474,6 +474,9 @@ class TimelineEngine(
             durationMs = safeDuration,
         )
 
+        val normalizedTransform = UnifiedTextEngine.effectiveTransform(spec, LayerTransform())
+        val normalizedSpec = spec.copy(offsetX = 0f, offsetY = 0f)
+
         val newClip = TimelineClipRef(
             clipId = UUID.randomUUID().toString(),
             assetId = TEXT_ASSET_PLACEHOLDER_ID,
@@ -483,7 +486,8 @@ class TimelineEngine(
             durationMs = safeDuration,
             sourceTotalDurationMs = MAX_IMAGE_CLIP_DURATION_MS,
             clipKind = ClipKind.TEXT,
-            textSpec = spec,
+            transform = normalizedTransform,
+            textSpec = normalizedSpec,
         )
 
         val updatedTracks = workingDoc.tracks.map { track ->
@@ -663,6 +667,8 @@ class TimelineEngine(
             } else {
                 req.timelineStartMs
             }
+            val normalizedTransform = UnifiedTextEngine.effectiveTransform(req.spec, LayerTransform())
+            val normalizedSpec = req.spec.copy(offsetX = 0f, offsetY = 0f)
             val newClip = TimelineClipRef(
                 clipId = UUID.randomUUID().toString(),
                 assetId = TEXT_ASSET_PLACEHOLDER_ID,
@@ -672,7 +678,8 @@ class TimelineEngine(
                 durationMs = req.durationMs,
                 sourceTotalDurationMs = MAX_IMAGE_CLIP_DURATION_MS,
                 clipKind = ClipKind.TEXT,
-                textSpec = req.spec,
+                transform = normalizedTransform,
+                textSpec = normalizedSpec,
             )
             insertedClips += newClip
             existingOnTrack += newClip
@@ -1050,18 +1057,13 @@ class TimelineEngine(
         nowMs: Long = System.currentTimeMillis(),
     ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
         if (clip.clipKind == ClipKind.ADJUSTMENT) return@updateClipById clip
-        clip.copy(
-            transform = transform.copy(
-                positionX = transform.positionX.coerceIn(-1f, 1f),
-                positionY = transform.positionY.coerceIn(-1f, 1f),
-                scaleX = transform.scaleX.coerceIn(0.1f, 4.0f),
-                scaleY = transform.scaleY.coerceIn(0.1f, 4.0f),
-                rotationDeg = transform.rotationDeg.coerceIn(-360f, 360f),
-                opacity = transform.opacity.coerceIn(0f, 1f),
-                anchorX = transform.anchorX.coerceIn(0f, 1f),
-                anchorY = transform.anchorY.coerceIn(0f, 1f),
-            ),
-        )
+        if (clip.clipKind == ClipKind.TEXT) {
+            UnifiedTextEngine.normalizeClipTransformForEdit(clip, transform)
+        } else {
+            clip.copy(
+                transform = UnifiedTextEngine.clampTransform(transform),
+            )
+        }
     }
 
     fun updateClipBlendMode(

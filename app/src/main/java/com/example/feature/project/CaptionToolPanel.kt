@@ -1,8 +1,6 @@
 package com.example.feature.project
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,6 +20,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -48,6 +47,7 @@ import com.example.core.common.TimeFormatting
 import com.example.core.designsystem.EmptyStudioState
 import com.example.core.designsystem.StudioBadge
 import com.example.core.designsystem.StudioPanel
+import com.example.engine.asr.AsrLanguageOption
 import com.example.engine.asr.AsrModelAvailability
 import com.example.engine.project.KaraokeHighlightMode
 import com.example.engine.project.MediaAsset
@@ -64,6 +64,7 @@ fun CaptionToolPanel(
     fps: Int,
     onSelectSourceAsset: (String?) -> Unit,
     onSelectModel: (String) -> Unit,
+    onSelectLanguage: (String) -> Unit = {},
     onDownloadModel: (String) -> Unit,
     onCancelModelDownload: (String) -> Unit,
     onDeleteModel: (String) -> Unit,
@@ -84,9 +85,10 @@ fun CaptionToolPanel(
     } ?: audioSources.firstOrNull()
     val model = captionState.selectedModel
     val availability = captionState.selectedModelAvailability
+    val selectedLanguage = captionState.selectedLanguage
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // 1. Offline ASR Header & Privacy Guarantee
+        // 1. Offline Whisper ASR Header & Source Media
         StudioPanel(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(12.dp),
@@ -114,7 +116,7 @@ fun CaptionToolPanel(
                         )
                     }
                     StudioBadge(
-                        text = "ON-DEVICE",
+                        text = "sherpa-onnx Whisper",
                         containerColor = MaterialTheme.colorScheme.secondaryContainer,
                         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     )
@@ -137,7 +139,6 @@ fun CaptionToolPanel(
                     )
                 }
 
-                // Source Media Picker
                 Text(
                     text = "Source Audio / Video",
                     style = MaterialTheme.typography.labelMedium,
@@ -147,7 +148,7 @@ fun CaptionToolPanel(
                     EmptyStudioState(
                         icon = Icons.Default.GraphicEq,
                         title = "No Audio or Video Assets",
-                        subtitle = "Import a video or audio clip into this project before running speech transcription.",
+                        subtitle = "Import a video or audio clip into this project before running Whisper speech transcription.",
                     )
                 } else {
                     Row(
@@ -175,14 +176,14 @@ fun CaptionToolPanel(
             }
         }
 
-        // 2. Language & Explicit Offline Model Provisioning
+        // 2. Decoupled Whisper Model & Language Selection + Provisioning
         StudioPanel(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    text = "Recognition Language (Vosk Offline Models)",
+                    text = "Offline Whisper Model",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -193,15 +194,38 @@ fun CaptionToolPanel(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     captionState.models.forEach { spec ->
+                        val shortTitle = if (spec.id.contains("tiny")) "Whisper Tiny" else "Whisper Base"
                         FilterChip(
                             selected = spec.id == model.id,
                             onClick = { onSelectModel(spec.id) },
-                            label = { Text("${spec.languageLabel} (~${spec.approximateSizeMb} MB)") },
-                            modifier = Modifier.testTag("asr_model_${spec.languageCode}"),
+                            label = { Text("$shortTitle (~${spec.approximateSizeMb} MB)") },
+                            modifier = Modifier.testTag("asr_model_${spec.id}"),
                         )
                     }
                 }
 
+                Text(
+                    text = "Spoken Language",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AsrLanguageOption.entries.forEach { lang ->
+                        FilterChip(
+                            selected = selectedLanguage == lang,
+                            onClick = { onSelectLanguage(lang.code) },
+                            label = { Text(lang.nativeLabel) },
+                            modifier = Modifier.testTag("asr_lang_${lang.code}"),
+                        )
+                    }
+                }
+
+                // Model installation status card
                 Surface(
                     color = studio.elevatedPanel,
                     shape = RoundedCornerShape(10.dp),
@@ -218,11 +242,35 @@ fun CaptionToolPanel(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = model.displayName,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = model.displayName,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    val statusLabel = when (availability) {
+                                        is AsrModelAvailability.Ready -> "READY"
+                                        is AsrModelAvailability.Downloading -> "DOWNLOADING"
+                                        is AsrModelAvailability.Error -> "FAILED"
+                                        AsrModelAvailability.NotInstalled -> "NOT DOWNLOADED"
+                                    }
+                                    StudioBadge(
+                                        text = statusLabel,
+                                        containerColor = when (availability) {
+                                            is AsrModelAvailability.Ready -> studio.readyEmeraldContainer
+                                            is AsrModelAvailability.Error -> MaterialTheme.colorScheme.errorContainer
+                                            else -> MaterialTheme.colorScheme.surfaceVariant
+                                        },
+                                        contentColor = when (availability) {
+                                            is AsrModelAvailability.Ready -> studio.readyEmerald
+                                            is AsrModelAvailability.Error -> MaterialTheme.colorScheme.onErrorContainer
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
                                 Text(
                                     text = model.note,
                                     style = MaterialTheme.typography.labelSmall,
@@ -254,7 +302,7 @@ fun CaptionToolPanel(
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.DeleteOutline,
-                                                contentDescription = "Delete offline model",
+                                                contentDescription = "Delete offline Whisper model",
                                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
@@ -265,20 +313,26 @@ fun CaptionToolPanel(
                                         onClick = { onCancelModelDownload(model.id) },
                                     )
                                 }
-                                is AsrModelAvailability.NotInstalled,
-                                is AsrModelAvailability.Error,
-                                -> {
+                                is AsrModelAvailability.Error -> {
+                                    Button(
+                                        onClick = { onDownloadModel(model.id) },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("retry_asr_model_download_button"),
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Retry")
+                                    }
+                                }
+                                AsrModelAvailability.NotInstalled -> {
                                     Button(
                                         onClick = { onDownloadModel(model.id) },
                                         modifier = Modifier
                                             .minimumInteractiveComponentSize()
                                             .testTag("download_asr_model_button"),
                                     ) {
-                                        Icon(
-                                            Icons.Default.CloudDownload,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
-                                        )
+                                        Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text("Download (${model.approximateSizeMb} MB)")
                                     }
@@ -294,7 +348,7 @@ fun CaptionToolPanel(
                             val dlMb = availability.downloadedBytes / (1024f * 1024f)
                             val totMb = (availability.totalBytes.coerceAtLeast(1L)) / (1024f * 1024f)
                             Text(
-                                text = "Downloading & verifying offline model: ${String.format("%.1f / %.1f MB", dlMb, totMb)}",
+                                text = "Downloading & extracting .tar.bz2: ${String.format("%.1f / %.1f MB", dlMb, totMb)}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -309,7 +363,8 @@ fun CaptionToolPanel(
                 }
 
                 // Run / Cancel Transcription
-                val isRunning = captionState.jobState is AutoCaptionJobState.Running
+                val isBusy = captionState.jobState is AutoCaptionJobState.LoadingModel ||
+                    captionState.jobState is AutoCaptionJobState.Running
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -317,7 +372,7 @@ fun CaptionToolPanel(
                 ) {
                     Button(
                         onClick = onStartTranscription,
-                        enabled = !isRunning &&
+                        enabled = !isBusy &&
                             selectedSource != null &&
                             availability is AsrModelAvailability.Ready,
                         modifier = Modifier
@@ -327,10 +382,16 @@ fun CaptionToolPanel(
                     ) {
                         Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(if (isRunning) "Transcribing..." else "Transcribe Audio")
+                        val buttonText = when (captionState.jobState) {
+                            is AutoCaptionJobState.LoadingModel -> "Loading Model..."
+                            is AutoCaptionJobState.Running -> "Recognizing..."
+                            is AutoCaptionJobState.Error -> "Retry Transcribe"
+                            else -> "Transcribe (${selectedLanguage.nativeLabel})"
+                        }
+                        Text(buttonText, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
 
-                    if (isRunning) {
+                    if (isBusy) {
                         OutlinedButton(
                             onClick = onCancelTranscription,
                             modifier = Modifier
@@ -343,6 +404,14 @@ fun CaptionToolPanel(
                 }
 
                 when (val job = captionState.jobState) {
+                    is AutoCaptionJobState.LoadingModel -> {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text(
+                            text = "Loading ${job.modelName} into memory...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     is AutoCaptionJobState.Running -> {
                         LinearProgressIndicator(
                             progress = { job.progress.coerceIn(0f, 1f) },
@@ -360,17 +429,33 @@ fun CaptionToolPanel(
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text(
-                                text = job.message,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                modifier = Modifier.padding(8.dp),
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = job.message,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (availability is AsrModelAvailability.Ready && selectedSource != null) {
+                                    OutlinedButton(
+                                        onClick = onStartTranscription,
+                                        modifier = Modifier.minimumInteractiveComponentSize(),
+                                    ) {
+                                        Text("Retry")
+                                    }
+                                }
+                            }
                         }
                     }
                     is AutoCaptionJobState.Completed -> {
                         Text(
-                            text = "Recognized ${job.cueCount} cue(s) via ${job.engineName}. Review or edit before inserting.",
+                            text = "Completed: ${job.cueCount} cue(s) via ${job.engineName}. Review or edit before inserting.",
                             style = MaterialTheme.typography.labelSmall,
                             color = studio.readyEmerald,
                         )
@@ -469,7 +554,7 @@ fun CaptionToolPanel(
 
                 if (captionState.cues.isEmpty()) {
                     Text(
-                        text = "Run offline transcription above to preview and edit word-timestamped caption cues.",
+                        text = "Run offline Whisper transcription above to preview and edit multilingual caption cues.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -504,7 +589,7 @@ fun CaptionToolPanel(
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.primary,
                                         )
-                                        if (cue.words.isNotEmpty()) {
+                                        if (cue.words.isNotEmpty() || cue.isTimingEstimated) {
                                             StudioBadge(
                                                 text = if (cue.isTimingEstimated) "EST" else "${cue.words.size}w",
                                                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -528,7 +613,7 @@ fun CaptionToolPanel(
                                     value = cue.text,
                                     onValueChange = { onUpdateCueText(cue.id, it) },
                                     singleLine = false,
-                                    maxLines = 3,
+                                    maxLines = 4,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("caption_cue_input_${cue.id}"),

@@ -29,6 +29,10 @@ data class EditableCaptionCue(
 /**
  * Pure-Kotlin segmentation & cue conversion pipeline turning ASR transcription output
  * into editable timeline caption cues and [TimedTextClipRequest] batches.
+ *
+ * Handles both space-delimited Latin scripts (Indonesian, English) and space-less CJK
+ * scripts (Japanese Kanji, Hiragana, Katakana, punctuation) without dropping characters
+ * or leaving stale word timestamps after overlap shifts.
  */
 object AutoCaptionSegmentation {
 
@@ -37,7 +41,8 @@ object AutoCaptionSegmentation {
         config: CaptionGenerationConfig = CaptionGenerationConfig(),
     ): List<EditableCaptionCue> {
         if (result.segments.isEmpty()) return emptyList()
-        val maxCharsPerClip = (config.maxCharsPerLine.coerceIn(14, 60) * config.maxLinesPerCaption.coerceIn(1, 3))
+        val maxChars = config.maxCharsPerLine.coerceIn(14, 60)
+        val maxCharsPerClip = (maxChars * config.maxLinesPerCaption.coerceIn(1, 3))
         val cues = mutableListOf<EditableCaptionCue>()
 
         for (seg in result.segments) {
@@ -45,8 +50,8 @@ object AutoCaptionSegmentation {
             if (cleanText.isEmpty()) continue
 
             if (seg.words.isEmpty()) {
-                // Segment-only ASR output: wrap text cleanly without fabricating fake word timings
-                val wrapped = wrapLines(cleanText, config.maxCharsPerLine.coerceIn(14, 60))
+                // Segment-only ASR output: wrap text cleanly (including long/CJK lines) without inventing word timings
+                val wrapped = wrapLines(cleanText, maxChars)
                 val start = (seg.startMs + config.clipStartOffsetMs).coerceAtLeast(0L)
                 val end = max(start + 200L, seg.endMs + config.clipStartOffsetMs)
                 cues += EditableCaptionCue(
@@ -67,8 +72,8 @@ object AutoCaptionSegmentation {
                 if (currentWords.isEmpty()) return
                 val cueStart = (currentWords.first().startMs + config.clipStartOffsetMs).coerceAtLeast(0L)
                 val cueEnd = max(cueStart + 160L, currentWords.last().endMs + config.clipStartOffsetMs)
-                val joined = currentWords.joinToString(" ") { it.word }
-                val wrapped = wrapLines(joined, config.maxCharsPerLine.coerceIn(14, 60))
+                val joined = joinTokensNaturally(currentWords.map { it.word })
+                val wrapped = wrapLines(joined, maxChars)
                 cues += EditableCaptionCue(
                     text = wrapped,
                     startMs = cueStart,
@@ -88,23 +93,38 @@ object AutoCaptionSegmentation {
             for (word in seg.words) {
                 val prev = currentWords.lastOrNull()
                 val pauseGapMs = if (prev != null) word.startMs - prev.endMs else 0L
-                val nextLen = if (currentWords.isEmpty()) word.word.length else currentLen + 1 + word.word.length
+                val separatorCost = if (currentWords.isEmpty() || containsCjk(word.word)) 0 else 1
+                val nextLen = currentLen + separatorCost + word.word.length
                 if (currentWords.isNotEmpty() && (nextLen > maxCharsPerClip || pauseGapMs > 900L)) {
                     flushCurrentCue()
                 }
                 currentWords += word
-                currentLen = if (currentWords.size == 1) word.word.length else currentLen + 1 + word.word.length
+                currentLen = if (currentWords.size == 1) word.word.length else currentLen + separatorCost + word.word.length
             }
             flushCurrentCue()
         }
 
-        // Guarantee monotonic non-overlapping cue ordering
+        // Guarantee monotonic non-overlapping cue ordering AND shift word timestamps atomically!
         val ordered = mutableListOf<EditableCaptionCue>()
         for (cue in cues.sortedBy { it.startMs }) {
             val prev = ordered.lastOrNull()
             val adjustedStart = if (prev != null) max(cue.startMs, prev.endMs) else cue.startMs
-            val adjustedEnd = max(adjustedStart + 120L, cue.endMs)
-            ordered += cue.copy(startMs = adjustedStart, endMs = adjustedEnd)
+            val shiftDelta = (adjustedStart - cue.startMs).coerceAtLeast(0L)
+            val shiftedEnd = max(adjustedStart + 120L, cue.endMs + shiftDelta)
+            val shiftedWords = if (shiftDelta == 0L || cue.words.isEmpty()) {
+                cue.words
+            } else {
+                cue.words.map { w ->
+                    val ws = (w.startMs + shiftDelta).coerceAtLeast(adjustedStart)
+                    val we = max(ws + 40L, w.endMs + shiftDelta)
+                    w.copy(startMs = ws, endMs = we)
+                }
+            }
+            ordered += cue.copy(
+                startMs = adjustedStart,
+                endMs = shiftedEnd,
+                words = shiftedWords,
+            )
         }
         return ordered
     }
@@ -154,21 +174,82 @@ object AutoCaptionSegmentation {
     }
 
     fun wrapLines(text: String, maxCharsPerLine: Int): String {
-        val words = UnifiedTextEngine.tokenizeWords(text)
-        if (words.isEmpty()) return ""
+        val safeMax = maxCharsPerLine.coerceAtLeast(4)
+        val rawTokens = UnifiedTextEngine.tokenizeWords(text)
+        if (rawTokens.isEmpty()) return ""
+
+        // Split oversized unspaced runs (such as continuous Japanese phrases) along punctuation or char width
+        val expandedTokens = mutableListOf<String>()
+        for (token in rawTokens) {
+            if (token.length <= safeMax) {
+                expandedTokens += token
+            } else {
+                expandedTokens += splitLongToken(token, safeMax)
+            }
+        }
+
         val lines = mutableListOf<StringBuilder>()
         var current = StringBuilder()
-        for (w in words) {
+        for (token in expandedTokens) {
+            val isCjkChunk = containsCjk(token)
+            val joinWithSpace = current.isNotEmpty() && !(isCjkChunk && containsCjk(current.toString()))
+            val addedLen = token.length + if (joinWithSpace) 1 else 0
             if (current.isEmpty()) {
-                current.append(w)
-            } else if (current.length + 1 + w.length <= maxCharsPerLine) {
-                current.append(' ').append(w)
+                current.append(token)
+            } else if (current.length + addedLen <= safeMax) {
+                if (joinWithSpace) current.append(' ')
+                current.append(token)
             } else {
                 lines += current
-                current = StringBuilder(w)
+                current = StringBuilder(token)
             }
         }
         if (current.isNotEmpty()) lines += current
         return lines.joinToString("\n") { it.toString() }
+    }
+
+    private fun joinTokensNaturally(tokens: List<String>): String {
+        if (tokens.isEmpty()) return ""
+        val sb = StringBuilder()
+        for (token in tokens) {
+            if (sb.isEmpty()) {
+                sb.append(token)
+            } else if (containsCjk(token) && containsCjk(sb.toString())) {
+                sb.append(token)
+            } else {
+                sb.append(' ').append(token)
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun splitLongToken(token: String, maxLen: Int): List<String> {
+        val chunks = mutableListOf<String>()
+        var idx = 0
+        while (idx < token.length) {
+            val hardEnd = min(token.length, idx + maxLen)
+            if (hardEnd == token.length) {
+                chunks += token.substring(idx)
+                break
+            }
+            // Prefer breaking right after Japanese/CJK punctuation within the window
+            var breakPos = -1
+            for (scan in hardEnd - 1 downTo idx + (maxLen / 2).coerceAtLeast(1)) {
+                val ch = token[scan]
+                if (ch == '。' || ch == '、' || ch == '！' || ch == '？' || ch == ',' || ch == '.') {
+                    breakPos = scan + 1
+                    break
+                }
+            }
+            val actualEnd = if (breakPos > idx) breakPos else hardEnd
+            chunks += token.substring(idx, actualEnd)
+            idx = actualEnd
+        }
+        return chunks
+    }
+
+    private fun containsCjk(text: String): Boolean = text.any { ch ->
+        val code = ch.code
+        code in 0x3000..0x30FF || code in 0x4E00..0x9FFF || code in 0xFF00..0xFFEF
     }
 }

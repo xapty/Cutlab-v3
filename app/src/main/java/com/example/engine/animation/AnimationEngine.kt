@@ -149,8 +149,8 @@ class AnimationEngine {
         if (clip.keyframeTracks.isEmpty()) return clip.transform
         val base = clip.transform
         return base.copy(
-            positionX = evaluateProperty(clip, KeyframeProperty.POSITION_X, clipRelativeMs).coerceIn(-1f, 1f),
-            positionY = evaluateProperty(clip, KeyframeProperty.POSITION_Y, clipRelativeMs).coerceIn(-1f, 1f),
+            positionX = evaluateProperty(clip, KeyframeProperty.POSITION_X, clipRelativeMs).coerceIn(-1.5f, 1.5f),
+            positionY = evaluateProperty(clip, KeyframeProperty.POSITION_Y, clipRelativeMs).coerceIn(-1.5f, 1.5f),
             scaleX = evaluateProperty(clip, KeyframeProperty.SCALE_X, clipRelativeMs).coerceIn(0.1f, 4.0f),
             scaleY = evaluateProperty(clip, KeyframeProperty.SCALE_Y, clipRelativeMs).coerceIn(0.1f, 4.0f),
             rotationDeg = evaluateProperty(clip, KeyframeProperty.ROTATION, clipRelativeMs).coerceIn(-360f, 360f),

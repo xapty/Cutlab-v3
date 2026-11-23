@@ -3,6 +3,44 @@ package com.example.engine.asr
 import java.io.File
 import java.util.UUID
 
+enum class AsrLanguageOption(
+    val code: String,
+    val displayName: String,
+    val nativeLabel: String,
+    val whisperLanguageParam: String,
+) {
+    AUTO(
+        code = "auto",
+        displayName = "Auto Detect",
+        nativeLabel = "Auto Detect",
+        whisperLanguageParam = "",
+    ),
+    INDONESIAN(
+        code = "id",
+        displayName = "Indonesian",
+        nativeLabel = "Bahasa Indonesia",
+        whisperLanguageParam = "id",
+    ),
+    ENGLISH(
+        code = "en",
+        displayName = "English",
+        nativeLabel = "English",
+        whisperLanguageParam = "en",
+    ),
+    JAPANESE(
+        code = "ja",
+        displayName = "Japanese",
+        nativeLabel = "日本語",
+        whisperLanguageParam = "ja",
+    ),
+    ;
+
+    companion object {
+        fun fromCode(code: String?): AsrLanguageOption =
+            entries.firstOrNull { it.code.equals(code, ignoreCase = true) } ?: AUTO
+    }
+}
+
 data class AsrModelSpec(
     val id: String,
     val displayName: String,
@@ -11,58 +49,46 @@ data class AsrModelSpec(
     val downloadUrl: String,
     val approximateSizeMb: Int,
     val note: String,
+    val archiveType: String = "tar.bz2",
+    val encoderFileName: String = "",
+    val decoderFileName: String = "",
+    val tokensFileName: String = "",
+    val isDefault: Boolean = false,
 )
 
 object AsrModelCatalog {
     val MODELS: List<AsrModelSpec> = listOf(
         AsrModelSpec(
-            id = "vosk-model-small-en-us-0.15",
-            displayName = "English (US) Compact",
-            languageCode = "en",
-            languageLabel = "English (US)",
-            downloadUrl = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-            approximateSizeMb = 40,
-            note = "Offline Vosk speech model with word timestamps",
+            id = "whisper-tiny-multilingual-int8",
+            displayName = "Whisper Tiny (Multilingual INT8)",
+            languageCode = "multilingual",
+            languageLabel = "Multilingual (ID · EN · JA)",
+            downloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
+            approximateSizeMb = 111,
+            note = "Fast offline sherpa-onnx Whisper INT8 model supporting Auto, ID, EN, JA & 99+ languages",
+            archiveType = "tar.bz2",
+            encoderFileName = "tiny-encoder.int8.onnx",
+            decoderFileName = "tiny-decoder.int8.onnx",
+            tokensFileName = "tiny-tokens.txt",
+            isDefault = true,
         ),
         AsrModelSpec(
-            id = "vosk-model-small-es-0.42",
-            displayName = "Spanish Compact",
-            languageCode = "es",
-            languageLabel = "Español",
-            downloadUrl = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
-            approximateSizeMb = 39,
-            note = "Offline Vosk speech model with word timestamps",
-        ),
-        AsrModelSpec(
-            id = "vosk-model-small-fr-0.22",
-            displayName = "French Compact",
-            languageCode = "fr",
-            languageLabel = "Français",
-            downloadUrl = "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip",
-            approximateSizeMb = 41,
-            note = "Offline Vosk speech model with word timestamps",
-        ),
-        AsrModelSpec(
-            id = "vosk-model-small-de-0.15",
-            displayName = "German Compact",
-            languageCode = "de",
-            languageLabel = "Deutsch",
-            downloadUrl = "https://alphacephei.com/vosk/models/vosk-model-small-de-0.15.zip",
-            approximateSizeMb = 45,
-            note = "Offline Vosk speech model with word timestamps",
-        ),
-        AsrModelSpec(
-            id = "vosk-model-small-ja-0.22",
-            displayName = "Japanese Compact",
-            languageCode = "ja",
-            languageLabel = "日本語",
-            downloadUrl = "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip",
-            approximateSizeMb = 48,
-            note = "Offline Vosk speech model with word timestamps",
+            id = "whisper-base-multilingual-int8",
+            displayName = "Whisper Base (Multilingual INT8)",
+            languageCode = "multilingual",
+            languageLabel = "Multilingual Higher Accuracy",
+            downloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2",
+            approximateSizeMb = 198,
+            note = "Higher-accuracy offline sherpa-onnx Whisper Base INT8 model for challenging audio & accents",
+            archiveType = "tar.bz2",
+            encoderFileName = "base-encoder.int8.onnx",
+            decoderFileName = "base-decoder.int8.onnx",
+            tokensFileName = "base-tokens.txt",
+            isDefault = false,
         ),
     )
 
-    fun defaultModel(): AsrModelSpec = MODELS.first()
+    fun defaultModel(): AsrModelSpec = MODELS.firstOrNull { it.isDefault } ?: MODELS.first()
 
     fun findById(id: String): AsrModelSpec? = MODELS.firstOrNull { it.id == id }
 }
@@ -106,6 +132,7 @@ data class AsrTranscriptResult(
     val hasAudioTrack: Boolean,
     val isSilentOrEmpty: Boolean,
     val engineName: String,
+    val detectedLanguageCode: String? = null,
 )
 
 data class PcmStreamSummary(
@@ -124,6 +151,7 @@ interface SpeechRecognitionEngine {
         assetId: String,
         modelSpec: AsrModelSpec,
         modelDirectory: File,
+        languageOption: AsrLanguageOption = AsrLanguageOption.AUTO,
         streamMono16kPcm: suspend (onChunk: suspend (samples16k: ShortArray, chunkStartMs: Long) -> Unit) -> PcmStreamSummary,
         onProgress: (progress: Float, status: String) -> Unit,
     ): Result<AsrTranscriptResult>

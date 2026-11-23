@@ -1185,6 +1185,13 @@ class ProjectWorkspaceViewModel(
         editSession.updateDraft(timelineEngine.updateClipTransform(base, clip.clipId, transform))
     }
 
+    fun previewTransformForClip(clipId: String, transform: LayerTransform) {
+        val base = ensureGestureBaseDocument() ?: return
+        val clip = base.tracks.asSequence().flatMap { it.clips.asSequence() }.firstOrNull { it.clipId == clipId } ?: return
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return
+        editSession.updateDraft(timelineEngine.updateClipTransform(base, clipId, transform))
+    }
+
     fun updateSelectedClipBlendMode(blendMode: BlendModePreset) {
         if (!guardWritableOrEmit()) return
         val doc = uiState.value.project ?: return
@@ -1769,6 +1776,8 @@ class ProjectWorkspaceViewModel(
     }
 
     fun selectAsrModel(modelId: String) = captionLyricCoordinator.selectAsrModel(modelId)
+
+    fun selectCaptionLanguage(languageCode: String) = captionLyricCoordinator.selectCaptionLanguage(languageCode)
 
     fun downloadSelectedAsrModel(modelId: String = uiState.value.autoCaptionState.selectedModelId) =
         captionLyricCoordinator.downloadModel(modelId)

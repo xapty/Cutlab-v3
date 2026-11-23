@@ -8,6 +8,13 @@ import android.view.ViewGroup
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateRotation
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -23,18 +30,23 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,9 +60,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
@@ -65,6 +79,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -131,6 +146,11 @@ fun TimelinePreviewMonitor(
     isPlaying: Boolean,
     preferProxyPlayback: Boolean = true,
     stageHeight: Dp = 188.dp,
+    selectedClipId: String? = null,
+    onSelectClip: (String) -> Unit = {},
+    onBeginTransformGesture: () -> Unit = {},
+    onPreviewClipTransform: (String, LayerTransform) -> Unit = { _, _ -> },
+    onCommitTransformGesture: (String) -> Unit = {},
     onTogglePlayPause: () -> Unit,
     onStepFrame: (Int) -> Unit,
     onJumpStart: () -> Unit,
@@ -385,6 +405,15 @@ fun TimelinePreviewMonitor(
         it.clip.textSpec?.renderMode == TextRenderMode.INVERT_VIDEO
     }
     val hasVisualContent = resolvedComposition.layers.isNotEmpty() || hasInvertLyric
+    var textTransformMode by remember { mutableStateOf(false) }
+    val activeSelectedTextLayer = activeFrame.textLayers.firstOrNull {
+        it.clip.clipId == selectedClipId
+    }
+    LaunchedEffect(activeFrame.textLayers.size) {
+        if (activeFrame.textLayers.isEmpty()) {
+            textTransformMode = false
+        }
+    }
 
     Column(
         modifier = modifier
@@ -476,11 +505,12 @@ fun TimelinePreviewMonitor(
                     )
                 }
 
-                // Active Text & Kinetic Typography Layers (NORMAL mode in Compose; INVERT_VIDEO is composited by GL)
+                // Active Text & Kinetic Typography Layers (NORMAL rendered via Compose; INVERT_VIDEO composited in GL with interactive selection outline overlay)
                 activeFrame.textLayers.forEach { textLayer ->
                     val animatedSpec = animationEngine.evaluateTextSpec(textLayer.clip, textLayer.clipRelativeMs)
                     val animatedTransform = animationEngine.evaluateTransform(textLayer.clip, textLayer.clipRelativeMs)
-                    if (animatedSpec != null && animatedSpec.renderMode != TextRenderMode.INVERT_VIDEO) {
+                    if (animatedSpec != null) {
+                        val isSelected = textLayer.clip.clipId == selectedClipId
                         RenderedTextOverlay(
                             spec = animatedSpec,
                             transform = animatedTransform,
@@ -488,8 +518,64 @@ fun TimelinePreviewMonitor(
                             clipRelativeMs = textLayer.clipRelativeMs,
                             stageWidthPx = stageWidthPx,
                             stageHeightPx = stageHeightPx,
+                            isInvertMaskLayer = animatedSpec.renderMode == TextRenderMode.INVERT_VIDEO,
+                            isSelected = isSelected,
+                            showTransformOutline = textTransformMode && isSelected,
+                            onTapSelect = { onSelectClip(textLayer.clip.clipId) },
                         )
                     }
+                }
+
+                // Stage-wide Transform Gesture Overlay (only active when explicit Transform Mode is toggled on)
+                if (textTransformMode && activeSelectedTextLayer != null) {
+                    val selectedBaseTransform = UnifiedTextEngine.effectiveTransform(
+                        activeSelectedTextLayer.clip.textSpec,
+                        activeSelectedTextLayer.clip.transform,
+                    )
+                    PreviewTextTransformGestureOverlay(
+                        clipId = activeSelectedTextLayer.clip.clipId,
+                        baseTransform = selectedBaseTransform,
+                        stageWidthPx = stageWidthPx,
+                        stageHeightPx = stageHeightPx,
+                        onBeginGesture = onBeginTransformGesture,
+                        onPreviewTransform = onPreviewClipTransform,
+                        onCommitGesture = onCommitTransformGesture,
+                    )
+                }
+            }
+
+            // Explicit Text Transform Mode Toggle + Quick Handles (prevents accidental drags on underlying video)
+            if (activeFrame.textLayers.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterChip(
+                        selected = textTransformMode,
+                        onClick = {
+                            if (!textTransformMode && activeSelectedTextLayer == null) {
+                                activeFrame.textLayers.lastOrNull()?.clip?.clipId?.let(onSelectClip)
+                            }
+                            textTransformMode = !textTransformMode
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (textTransformMode) Icons.Default.Check else Icons.Default.OpenWith,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = if (textTransformMode) "Done" else "Transform",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        },
+                        modifier = Modifier.testTag("preview_text_transform_toggle"),
+                    )
                 }
             }
 
@@ -706,6 +792,151 @@ private fun syncExoPlayerToLayer(
 }
 
 @Composable
+private fun PreviewTextTransformGestureOverlay(
+    clipId: String,
+    baseTransform: LayerTransform,
+    stageWidthPx: Float,
+    stageHeightPx: Float,
+    onBeginGesture: () -> Unit,
+    onPreviewTransform: (String, LayerTransform) -> Unit,
+    onCommitGesture: (String) -> Unit,
+) {
+    val currentBase by rememberUpdatedState(baseTransform)
+    val currentClipId by rememberUpdatedState(clipId)
+    val currentW by rememberUpdatedState(stageWidthPx.coerceAtLeast(1f))
+    val currentH by rememberUpdatedState(stageHeightPx.coerceAtLeast(1f))
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(clipId) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var working = currentBase
+                    var gestureBegun = false
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val anyPressed = event.changes.any { it.pressed }
+                            if (!anyPressed) break
+
+                            val pan = event.calculatePan()
+                            val zoom = event.calculateZoom()
+                            val rot = event.calculateRotation()
+                            val hasChange = pan != Offset.Zero ||
+                                abs(zoom - 1f) > 0.002f ||
+                                abs(rot) > 0.1f
+
+                            if (hasChange) {
+                                if (!gestureBegun) {
+                                    gestureBegun = true
+                                    onBeginGesture()
+                                    working = currentBase
+                                }
+                                val nextX = (working.positionX + pan.x / currentW).coerceIn(-1.5f, 1.5f)
+                                val nextY = (working.positionY + pan.y / currentH).coerceIn(-1.5f, 1.5f)
+                                val nextScaleX = (working.scaleX * zoom).coerceIn(0.1f, 4.0f)
+                                val nextScaleY = if (working.uniformScale) {
+                                    nextScaleX
+                                } else {
+                                    (working.scaleY * zoom).coerceIn(0.1f, 4.0f)
+                                }
+                                val nextRot = (working.rotationDeg + rot).coerceIn(-360f, 360f)
+                                working = working.copy(
+                                    positionX = nextX,
+                                    positionY = nextY,
+                                    scaleX = nextX.let { nextScaleX },
+                                    scaleY = nextScaleY,
+                                    rotationDeg = nextRot,
+                                )
+                                onPreviewTransform(currentClipId, working)
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    } finally {
+                        if (gestureBegun) {
+                            onCommitGesture("Preview Text Transform")
+                        }
+                    }
+                }
+            },
+    ) {
+        // Explicit corner Scale & top Rotate handles for accessible single-finger manipulation
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(6.dp)
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.88f))
+                .pointerInput(clipId, "scale_handle") {
+                    var working = currentBase
+                    detectDragGestures(
+                        onDragStart = {
+                            onBeginGesture()
+                            working = currentBase
+                        },
+                        onDragEnd = { onCommitGesture("Preview Scale Text") },
+                        onDragCancel = { onCommitGesture("Preview Scale Text") },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val factor = 1f + (dragAmount.x + dragAmount.y) / 140f
+                            val nextSx = (working.scaleX * factor).coerceIn(0.2f, 3.0f)
+                            val nextSy = if (working.uniformScale) nextSx else (working.scaleY * factor).coerceIn(0.2f, 3.0f)
+                            working = working.copy(scaleX = nextSx, scaleY = nextSy)
+                            onPreviewTransform(currentClipId, working)
+                        },
+                    )
+                }
+                .testTag("preview_scale_handle"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Default.OpenWith,
+                contentDescription = "Drag to scale text",
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(6.dp)
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.88f))
+                .pointerInput(clipId, "rotate_handle") {
+                    var working = currentBase
+                    detectDragGestures(
+                        onDragStart = {
+                            onBeginGesture()
+                            working = currentBase
+                        },
+                        onDragEnd = { onCommitGesture("Preview Rotate Text") },
+                        onDragCancel = { onCommitGesture("Preview Rotate Text") },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val nextRot = (working.rotationDeg + dragAmount.x * 0.75f).coerceIn(-360f, 360f)
+                            working = working.copy(rotationDeg = nextRot)
+                            onPreviewTransform(currentClipId, working)
+                        },
+                    )
+                }
+                .testTag("preview_rotate_handle"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "Drag to rotate text",
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun RenderedTextOverlay(
     spec: TextOverlaySpec,
     transform: LayerTransform,
@@ -713,6 +944,10 @@ private fun RenderedTextOverlay(
     clipRelativeMs: Long,
     stageWidthPx: Float,
     stageHeightPx: Float,
+    isInvertMaskLayer: Boolean = false,
+    isSelected: Boolean = false,
+    showTransformOutline: Boolean = false,
+    onTapSelect: () -> Unit = {},
 ) {
     val animWindowMs = 450f
     val rawAnimT = (clipRelativeMs.toFloat() / animWindowMs).coerceIn(0f, 1f)
@@ -782,6 +1017,8 @@ private fun RenderedTextOverlay(
     val bgAlphaRatio = bgColor.alpha > 0.02f
     val padHDp = with(density) { (if (bgAlphaRatio) textSizePx * 0.55f else textSizePx * 0.28f).toDp() }
     val padVDp = with(density) { (if (bgAlphaRatio) textSizePx * 0.28f else textSizePx * 0.18f).toDp() }
+    val maxWrapWidthDp = with(density) { (stageWidthPx * 0.86f).coerceAtLeast(48f).toDp() }
+
     val animTranslateY = when (spec.animationPreset) {
         TextAnimationPreset.SLIDE_UP -> (1f - eased) * (stageHeightPx * 0.04f)
         else -> 0f
@@ -790,8 +1027,11 @@ private fun RenderedTextOverlay(
         sin(clipRelativeMs * 0.25f) * (stageWidthPx * 0.01f) * (1f - rawAnimT)
     } else 0f
 
-    val offsetPxX = ((spec.offsetX + transform.positionX).coerceIn(-0.95f, 0.95f) * stageWidthPx).roundToInt()
-    val offsetPxY = ((spec.offsetY + transform.positionY).coerceIn(-0.95f, 0.95f) * stageHeightPx).roundToInt()
+    val effPosX = UnifiedTextEngine.effectivePositionX(spec, transform)
+    val effPosY = UnifiedTextEngine.effectivePositionY(spec, transform)
+    val offsetPxX = (effPosX * stageWidthPx + glitchOffsetX).roundToInt()
+    val offsetPxY = (effPosY * stageHeightPx + animTranslateY).roundToInt()
+
     val composeBlend = when (blendMode) {
         BlendModePreset.NORMAL -> BlendMode.SrcOver
         BlendModePreset.ADD -> BlendMode.Plus
@@ -858,8 +1098,12 @@ private fun RenderedTextOverlay(
     Box(
         modifier = Modifier
             .offset { IntOffset(offsetPxX, offsetPxY) }
+            .widthIn(max = maxWrapWidthDp)
+            .pointerInput(onTapSelect) {
+                detectTapGestures { onTapSelect() }
+            }
             .then(
-                if (blendMode != BlendModePreset.NORMAL) {
+                if (!isInvertMaskLayer && blendMode != BlendModePreset.NORMAL) {
                     Modifier.drawWithContent {
                         val layerPaint = Paint().apply { this.blendMode = composeBlend }
                         drawContext.canvas.saveLayer(size.toRect(), layerPaint)
@@ -871,21 +1115,36 @@ private fun RenderedTextOverlay(
                 },
             )
             .graphicsLayer {
-                alpha = (animAlpha * transform.opacity).coerceIn(0f, 1f)
+                alpha = if (isInvertMaskLayer) 1f else (animAlpha * transform.opacity).coerceIn(0f, 1f)
                 scaleX = animScale * transform.scaleX
                 scaleY = animScale * transform.scaleY
                 rotationZ = transform.rotationDeg
-                translationY = animTranslateY
-                translationX = glitchOffsetX
                 transformOrigin = TransformOrigin(transform.anchorX, transform.anchorY)
                 compositingStrategy = CompositingStrategy.Offscreen
             }
+            .then(
+                if (showTransformOutline) {
+                    Modifier.border(
+                        width = 1.5.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(cornerRadiusDp),
+                    )
+                } else if (isSelected) {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(cornerRadiusDp),
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .clip(RoundedCornerShape(cornerRadiusDp))
-            .background(bgColor)
+            .background(if (isInvertMaskLayer) Color.Transparent else bgColor)
             .padding(horizontal = padHDp, vertical = padVDp),
         contentAlignment = Alignment.Center,
     ) {
-        if (spec.hasStroke) {
+        if (!isInvertMaskLayer && spec.hasStroke) {
             Text(
                 text = annotatedDisplayText,
                 textAlign = textAlign,
@@ -904,12 +1163,13 @@ private fun RenderedTextOverlay(
         Text(
             text = annotatedDisplayText,
             textAlign = textAlign,
+            modifier = if (isInvertMaskLayer) Modifier.alpha(0f) else Modifier,
             style = TextStyle(
                 fontFamily = fontFamily,
                 fontWeight = fontWeight,
                 fontSize = baseSize,
                 color = textColor,
-                shadow = if (spec.hasShadow) {
+                shadow = if (!isInvertMaskLayer && spec.hasShadow) {
                     Shadow(
                         color = Color.Black.copy(alpha = 0.75f),
                         offset = Offset(textSizePx * 0.04f, textSizePx * 0.06f),
@@ -918,5 +1178,20 @@ private fun RenderedTextOverlay(
                 } else null,
             ),
         )
+        if (showTransformOutline) {
+            // Visual anchor pivot indicator inside transformed text box
+            Box(
+                modifier = Modifier
+                    .matchParentSize(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+        }
     }
 }
